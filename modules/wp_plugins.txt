@@ -1,0 +1,10 @@
+ad-rotator
+akismet
+bbpress
+gravatar
+journalpress
+mailchimp
+next-page
+powerpress
+wp-polls
+wp-super-cache
