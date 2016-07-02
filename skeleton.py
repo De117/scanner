@@ -1,9 +1,13 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 
+import threading
+import math
+import io
 import sys
 import os
 import socket
+THREAD_NUM = 100
 
 ###
 #
@@ -53,6 +57,30 @@ if len(sys.argv) != 2:
     print("Usage: "+sys.argv[0]+" input_file")
     sys.exit(0)
 
+###
+#
+# The thread dispatching the hostnames/IPs to the modules
+#
+###
+
+class Dispatch(threading.Thread):
+    def __init__(self, rank, modules, input_hosts, output_file):
+        threading.Thread.__init__(self)
+        self.rank = rank
+        self.input_hosts = input_hosts
+        self.output_file = output_file
+        self.modules = modules
+
+    def run(self):
+        i=0
+        for host in self.input_hosts:
+            i += 1
+            for m in self.modules:
+                m.process(host, self.output_file)
+            #if (i%10==0) or (i==len(self.input_hosts)):
+            print("%d: %d/%d"%(self.rank, i, len(self.input_hosts)),
+                    file=sys.stderr)
+
 
 ###
 #
@@ -91,7 +119,31 @@ sys.path.append(".") # necessary for proper importing
 for mod_name in mod_names:
     modules.append( __import__(mod_name) )
 
-# run the modules
-for host in host_list:
-    for m in modules:
-        m.process(host, sys.stdout)
+# divide the hostlist into THREAD_NUM disjoint ones
+thread_hosts = []
+for i in range(THREAD_NUM):
+    N = math.ceil(len(host_list)/THREAD_NUM)
+    thread_hosts.append( host_list[i*N : (i+1)*N] )
+
+# allocate outputs
+thread_streams = [io.StringIO() for i in range(THREAD_NUM)]
+
+# start the threads
+threads = []
+print("Starting the threads...", file=sys.stderr)
+for i in range(THREAD_NUM):
+    thread = Dispatch(i, modules, thread_hosts[i], thread_streams[i])
+    thread.start()
+    threads.append( thread )
+
+# wait for them to finish
+for thread in threads:
+    thread.join()
+
+# join and print the resulting outputs
+s = ""
+for stream in thread_streams:
+    stream.seek(0)
+    s += stream.read()
+
+print(s)
