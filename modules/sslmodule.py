@@ -25,20 +25,20 @@ def get_supported_ciphers(dest, protocol):
     The returned list contains cipher names.
     """
     chosen_ciphers = []
-# start by enabling all ciphers
+    # start by enabling all ciphers
     cipher_string = "ALL:aNULL:eNULL"
     while True:
         try:
             ssock = make_ssocket(protocol, cipher_string)
             ssock.connect(dest)
-        # the connection will be made with the highest-priority cipher
+            # the connection will be made with the highest-priority cipher
             chosen_ciphers.append( ssock.cipher()[0] )
             ssock.close()
-        # having detected the cipher, disable it
+            # having detected the cipher, disable it
             cipher_string += ":!"+chosen_ciphers[-1]
         except OSError:
-        # if no connection can be made with the remaining ciphers,
-        #  it means we've enumerated all the supported ones
+            # if no connection can be made with the remaining ciphers,
+            #  it means we've enumerated all the supported ones
             break
     return chosen_ciphers
 

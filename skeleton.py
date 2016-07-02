@@ -17,24 +17,38 @@ THREAD_NUM = 100
 ###
 
 
-def init_list(raw_list):
-    """Looks up the missing domains/IPs.
+def load_host_list(filename):
+    """Loads the list of hosts to test, looking up the missing parts.
 
-    Takes a list of domains xor IPs,
-    and returns a list of (domain, IP) tuples."""
-    ret = []
-    for el in raw_list:
-        if is_valid_IP(el):
-            # for IPs, we look up the host name
-            ret.append((lookup_host_name(el), el))
-        else:
-            # for domains, we look up the IP
-            addr = lookup_host_addr(el)
-            # if we can't find it, we throw it out
-            if addr:
-                ret.append((el, addr))
-    return list(set(ret))
+    The file should have each host on its own line,
+     in the form of "hostname IP", with at least one of those present.
+     Lines that do not conform are ignored.
+    """
+    try:
+        input_file = open(filename, "r")
+        lines = [l.strip().split() for l in input_file.readlines()]
+        input_file.close()
+    except IOError:
+        print("Error: could not read in file!", file=sys.stderr)
+        sys.exit(-1)
 
+    hosts = [tuple(l) for l in lines if len(l)==2]  # complete records
+    rest = [l[0] for l in lines if len(l)==1]       # incomplete records
+
+    IPs = [x for x in rest if is_valid_IP(x)]
+    names = list(set(rest)-set(IPs))
+
+    for ip in IPs:
+        hosts.append((lookup_host_name(ip), ip))
+
+    for name in names:
+        addr = lookup_host_addr(name)
+        # if we can't find the IP, we ignore the record
+        if name:
+            hosts.append((name, addr))
+
+    return hosts
+    
 
 def is_valid_IP(IP):
     """Returns True if the given IP is in the form '255.255.255.255'"""
@@ -61,6 +75,7 @@ def lookup_host_addr(hostname):
         return socket.gethostbyname(hostname)
     except socket.gaierror:
         return None
+
 
 ###
 #
@@ -101,16 +116,7 @@ if __name__=="__main__":
         sys.exit(0)
 
     # read in the file to process
-    try:
-        input_file = open(sys.argv[1], "r")
-        lines = [l.strip() for l in input_file.readlines()]
-        input_file.close()
-    except IOError:
-        print("Error: could not read in file!")
-        sys.exit(-1)
-
-    # look up necessary addresses/hostnames
-    host_list = init_list(lines)
+    host_list = load_host_list(sys.argv[1])
 
     # find module names
     try:
