@@ -7,14 +7,23 @@ import socket
 DETECT_CIPHERS = True
 DEFAULT_TIMEOUT = 5.0
 
-# creates a TCP socket wrapped in SSL
+
 def make_ssocket(protocol, ciphers=ssl._DEFAULT_CIPHERS):
+    """Creates a TCP socket wrapped in SSL."""
     return ssl.wrap_socket( socket.socket(),
                             ssl_version=protocol,
                             ciphers=ciphers)
 
-# returns a list of ciphers supported by a host, on a given protocol version
 def get_supported_ciphers(dest, protocol):
+    """Returns a list of ciphers supported by a host.
+
+    Arguments:
+        dest -- the (IP, port) to connect to
+        protocol -- the SSL/TLS version to test; it is also
+                     the index into the ssl._PROTOCOL_NAMES array
+
+    The returned list contains cipher names.
+    """
     chosen_ciphers = []
 # start by enabling all ciphers
     cipher_string = "ALL:aNULL:eNULL"
@@ -32,7 +41,6 @@ def get_supported_ciphers(dest, protocol):
         #  it means we've enumerated all the supported ones
             break
     return chosen_ciphers
-
 
 
 def process(host, stream):

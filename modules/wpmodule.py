@@ -16,9 +16,13 @@ plugin_list_location = "wp_plugins.txt"
 DETECT_PLUGINS = True
 DEFAULT_TIMEOUT = 10
 
-# returns version string if it can find one, 
-# otherwise just True if the site is a WordPress site
+
 def check_if_wordpress(domain):
+    """Checks whether the website on the given domain uses WordPress.
+
+    Returns a version number in string form, if it can find one;
+      otherwise it returns True if the site uses WP, or False if it doesn't.
+    """
     results = []
     results.append( check_feed(domain) )
     results.append( check_html_source(domain) )
@@ -27,8 +31,9 @@ def check_if_wordpress(domain):
             return res
     return any(results)
 
-# checks RSS feed (XML) for a "generator" tag
+
 def check_feed(domain):
+    """Checks the RSS feed of the website for a "generator" tag."""
     feed_path = domain+"feed/"
     try:
         response = requests.get(feed_path, timeout=DEFAULT_TIMEOUT)
@@ -49,8 +54,9 @@ def check_feed(domain):
             return False
     return False
 
-# checks page source (HTML) for a "generator" meta tag
+
 def check_html_source(domain):
+    """Checks the HTML source of the website for a "generator" meta tag."""
     try:
         response = requests.get(domain, timeout=DEFAULT_TIMEOUT)
     except requests.RequestException:
@@ -78,18 +84,22 @@ def check_html_source(domain):
         return False
     return False
 
+
 def check_for_plugins(domain, plugin_names):
     exists = {}
     for name in plugin_names:
         exists[name] = check_plugin_url(domain, name)
     return exists
 
+
 def check_plugin_url(domain, plugin_name):
-    paths=["wp-content/plugins/"]
+    paths = ["wp-content/plugins/"]
     res = False
     for path in paths:
         try:
-            response = requests.get(domain+path+plugin_name, timeout=DEFAULT_TIMEOUT)
+            response = requests.get(
+                        domain+path+plugin_name,
+                        timeout=DEFAULT_TIMEOUT)
         except requests.RequestException:
             return False
         # if response is 403 forbidden, plugin exists
@@ -100,18 +110,21 @@ def check_plugin_url(domain, plugin_name):
         res = res or (response.status_code == 403)
     return res
 
-# tries to load the plugin list
-# and returns it if successful
+
 def load_plugin_list():
-    tried_loading=True
+    """Loads the plugin list.
+
+    Returns the list if it can find the appropriate file,
+      else it returns None.
+    """
+    tried_loading = True
     try:
         f = open(plugin_list_location, "r")
         lines = [l.strip() for l in f.readlines()]
         f.close()
     except Exception:
-        return None;
-    return lines;
-
+        return None
+    return lines
 
 
 def process(host, stream):
@@ -138,7 +151,7 @@ def process(host, stream):
         plugin_list = load_plugin_list()
         if not plugin_list:
             return
-    
+
     # check for plugins
     if (wp and DETECT_PLUGINS):
         plugins = check_for_plugins(domain, plugin_list)
