@@ -3,6 +3,7 @@ from lxml import html, etree
 from io import StringIO
 import requests
 import urllib.parse
+import socket
 import sys
 
 ###
@@ -37,7 +38,7 @@ def check_feed(domain):
     feed_path = domain+"feed/"
     try:
         response = requests.get(feed_path, timeout=DEFAULT_TIMEOUT)
-    except requests.RequestException:
+    except (requests.RequestException, socket.timeout):
         return False
     if (response.ok):
         try:
@@ -59,7 +60,7 @@ def check_html_source(domain):
     """Checks the HTML source of the website for a "generator" meta tag."""
     try:
         response = requests.get(domain, timeout=DEFAULT_TIMEOUT)
-    except requests.RequestException:
+    except (requests.RequestException, socket.timeout):
         return False
     if not response.ok:
         return False
@@ -100,7 +101,7 @@ def check_plugin_url(domain, plugin_name):
             response = requests.get(
                         domain+path+plugin_name,
                         timeout=DEFAULT_TIMEOUT)
-        except requests.RequestException:
+        except (requests.RequestException, socket.timeout):
             return False
         # if response is 403 forbidden, plugin exists
         # otherwise, it should respond with 404
