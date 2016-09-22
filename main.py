@@ -58,10 +58,11 @@ def load_host_list(filename):
     log.info("Looking up the missing values...")
     threads = []
     counter = IntWrapper(value=0, total=len(IPs)+len(rest))
-    lock = threading.Lock()
     for i in range(THREAD_NUM):
-        thread = DNS_lookup(thread_ips[i], thread_names[i],
-                            hosts, lock, counter)
+        thread = threading.Thread(
+                    target=DNS_lookup,
+                    args=(thread_ips[i], thread_names[i], hosts, counter)
+                )
         thread.start()
         threads.append(thread)
 
@@ -116,66 +117,41 @@ def divide_array(array, num):
 ###
 
 
-class DNS_lookup(threading.Thread):
-    def __init__(self, IPs, hostnames, hosts, lock, counter):
-        threading.Thread.__init__(self)
-        self.IPs = IPs
-        self.names = hostnames
-        self.hosts = hosts
-        self.lock = lock
-        self.counter = counter
+def DNS_lookup(IPs, hostnames, hosts, counter):
+    for ip in IPs:
+        host = (lookup_host_name(ip), ip)
+        hosts.append(host)
+        counter.inc()
 
-    def inc(self):
-        self.lock.acquire()
-        self.counter.inc()
-        self.lock.release()
+    for name in hostnames:
+        addr = lookup_host_addr(name)
+        # if we can't find the IP, we ignore the record
+        if addr:
+            hosts.append((name, addr))
+        counter.inc()
+        
 
-    def run(self):
-        for ip in self.IPs:
-            host = (lookup_host_name(ip), ip)
-            self.hosts.append(host)
-            self.inc()
-
-        for name in self.names:
-            addr = lookup_host_addr(name)
-            # if we can't find the IP, we ignore the record
-            if addr:
-                self.hosts.append((name, addr))
-            self.inc()
-
-
-class Scan(threading.Thread):
-    def __init__(self, modules, input_hosts, output_file, lock, counter):
-        threading.Thread.__init__(self)
-        self.input_hosts = input_hosts
-        self.output_file = output_file
-        self.modules = modules
-        self.lock = lock
-        self.counter = counter
-
-    def inc(self):
-        self.lock.acquire()
-        self.counter.inc()
-        self.lock.release()
-
-    def run(self):
-        N = len(self.input_hosts)
-        for host in self.input_hosts:
-            for m in self.modules:
-                m.process(host, self.output_file)
-            self.inc()
+def Scan(modules, input_hosts, output_file, counter):
+    N = len(input_hosts)
+    for host in input_hosts:
+        for m in modules:
+            m.process(host, output_file)
+        counter.inc()
 
 
 class IntWrapper:
-    """A wrapper for an integer, for use as a counter."""
-    def __init__(self, value=0, total=0):
-        self.value = value
+    """A threadsafe wrapper for an integer, for use as a counter."""
+    def __init__(self, initial_value=0, total=0):
+        self.value = initial_value
         self.total = total
+        self.lock = threading.Lock()
 
     def inc(self):
+        self.lock.acquire()
         self.value += 1
         if (self.value % PRINT_FREQ == 0 or self.value == self.total):
             log.info("\t%d/%d" % (self.value, self.total))
+        self.lock.release()
 
 
 ###
@@ -231,12 +207,13 @@ if __name__=="__main__":
 
     # start the threads
     threads = []
-    lock = threading.Lock()
     counter = IntWrapper(0, len(host_list))
     log.info("Starting the scan...")
     for i in range(THREAD_NUM):
-        thread = Scan(modules, thread_hosts[i], thread_streams[i],
-                        lock, counter)
+        thread = threading.Thread(
+                    target=Scan,
+                    args=(modules, thread_hosts[i], thread_streams[i], counter)
+                )
         thread.start()
         threads.append(thread)
 
