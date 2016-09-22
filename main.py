@@ -8,6 +8,7 @@ import io
 import sys
 import os
 import socket
+import logging
 THREAD_NUM = 400
 PRINT_FREQ = 10
 
@@ -18,11 +19,14 @@ PRINT_FREQ = 10
 #
 ###
 
-start_time = time.time()
-
-def log(message):
-    now = "[%.4f] "%(time.time() - start_time)
-    print(now + message, file=sys.stderr)
+class RelativeFormatter(logging.Formatter):
+    """A custom formatter.
+    
+    Adds elapsed time (in seconds.milliseconds) in front of the message.
+    """
+    def format(self, record):
+        ret = super().format(record)
+        return "[%.4f] "%(record.relativeCreated/1000) + ret
 
 
 def load_host_list(filename):
@@ -51,7 +55,7 @@ def load_host_list(filename):
     thread_names = divide_array(names, THREAD_NUM)
 
     # ...and look them up in parallel
-    log("Looking up the missing values...")
+    log.info("Looking up the missing values...")
     threads = []
     counter = IntWrapper(value=0, total=len(IPs)+len(rest))
     lock = threading.Lock()
@@ -171,7 +175,7 @@ class IntWrapper:
     def inc(self):
         self.value += 1
         if (self.value % PRINT_FREQ == 0 or self.value == self.total):
-            log("\t%d/%d" % (self.value, self.total))
+            log.info("\t%d/%d" % (self.value, self.total))
 
 
 ###
@@ -186,12 +190,20 @@ if __name__=="__main__":
         print("Usage: "+sys.argv[0]+" host_list")
         sys.exit(0)
 
-    log("Reading in the host list...")
+    # create and initialize logger
+    log = logging.getLogger("main") # create logger @ info lvl
+    log.setLevel(logging.INFO)
+    sh = logging.StreamHandler()    # create streamhandler @ info lvl
+    sh.setLevel(logging.INFO)
+    sh.setFormatter(RelativeFormatter())    # add custom formatter
+    log.addHandler(sh)
+
+    log.info("Reading in the host list...")
     # read in the file to process
     host_list = load_host_list(sys.argv[1])
 
     # find module names
-    log("Detecting modules")
+    log.info("Detecting modules")
     try:
         mod_names = [x for x in os.listdir("./modules")
                         if x[0]!="." and x.endswith(".py")]
@@ -221,7 +233,7 @@ if __name__=="__main__":
     threads = []
     lock = threading.Lock()
     counter = IntWrapper(0, len(host_list))
-    log("Starting the scan...")
+    log.info("Starting the scan...")
     for i in range(THREAD_NUM):
         thread = Scan(modules, thread_hosts[i], thread_streams[i],
                         lock, counter)
@@ -238,5 +250,5 @@ if __name__=="__main__":
         stream.seek(0)
         s += stream.read()
 
-    log("Done.")
+    log.info("Done.")
     print(s)
