@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import threading
+import queue
 import math
 import time
 import io
@@ -9,15 +10,13 @@ import sys
 import os
 import socket
 import logging
-THREAD_NUM = 400
+THREAD_NUM = 200
 PRINT_FREQ = 10
+MAX_Q_SIZE = 200
 
-
-###
-#
-# Helper functions
-#
-###
+Qin = queue.Queue(MAX_Q_SIZE)
+Qout = queue.Queue(MAX_Q_SIZE)
+number_of_hosts = None
 
 class RelativeFormatter(logging.Formatter):
     """A custom formatter.
@@ -27,116 +26,6 @@ class RelativeFormatter(logging.Formatter):
     def format(self, record):
         ret = super().format(record)
         return "[%.4f] "%(record.relativeCreated/1000) + ret
-
-
-def load_host_list(filename):
-    """Loads the list of hosts to test, looking up the missing parts.
-
-    The file should have each host on its own line,
-     in the form of "hostname IP", with at least one of those present.
-     Lines that do not conform are ignored.
-    """
-    try:
-        input_file = open(filename, "r")
-        lines = [l.strip().split() for l in input_file.readlines()]
-        input_file.close()
-    except IOError:
-        print("Error: could not read in file!", file=sys.stderr)
-        sys.exit(-1)
-
-    hosts = [tuple(l) for l in lines if len(l)==2]  # complete records
-    rest = [l[0] for l in lines if len(l)==1]       # incomplete records
-
-    IPs = [x for x in rest if is_valid_IP(x)]
-    names = list(set(rest)-set(IPs))
-
-    # divide the arrays between threads...
-    thread_ips = divide_array(IPs, THREAD_NUM)
-    thread_names = divide_array(names, THREAD_NUM)
-
-    # ...and look them up in parallel
-    log.info("Looking up the missing values...")
-    threads = []
-    counter = IntWrapper(value=0, total=len(IPs)+len(rest))
-    for i in range(THREAD_NUM):
-        thread = threading.Thread(
-                    target=DNS_lookup,
-                    args=(thread_ips[i], thread_names[i], hosts, counter)
-                )
-        thread.start()
-        threads.append(thread)
-
-    for thread in threads:
-        thread.join()
-
-    return hosts
-
-
-def is_valid_IP(IP):
-    """Returns True if the given IP is in the form '255.255.255.255'"""
-    try:
-        socket.inet_aton(IP)
-        return IP.count(".") == 3
-    except OSError:
-        return False
-
-
-def lookup_host_name(IP):
-    """Looks up the host name, or a "?" if no hostname can be found."""
-    try:
-        return socket.gethostbyaddr(IP)[0]
-    except socket.herror:
-        return "?"
-
-
-def lookup_host_addr(hostname):
-    """Looks up a single host IP address.
-
-    Returns None if it cannot find one."""
-    try:
-        return socket.gethostbyname(hostname)
-    except socket.gaierror:
-        return None
-
-
-def divide_array(array, num):
-    """Divides the given array into num disjoint ones."""
-    ret = []
-    for i in range(num):
-        N = math.ceil(len(array)/num)
-        ret.append( array[i*N : (i+1)*N] )
-    return ret
-
-
-###
-#
-# The threads for:
-#   (reverse) DNS lookup
-#   dispatching the hosts to the modules
-#
-###
-
-
-def DNS_lookup(IPs, hostnames, hosts, counter):
-    for ip in IPs:
-        host = (lookup_host_name(ip), ip)
-        hosts.append(host)
-        counter.inc()
-
-    for name in hostnames:
-        addr = lookup_host_addr(name)
-        # if we can't find the IP, we ignore the record
-        if addr:
-            hosts.append((name, addr))
-        counter.inc()
-        
-
-def Scan(modules, input_hosts, output_file, counter):
-    N = len(input_hosts)
-    for host in input_hosts:
-        for m in modules:
-            m.process(host, output_file)
-        counter.inc()
 
 
 class IntWrapper:
@@ -154,6 +43,79 @@ class IntWrapper:
         self.lock.release()
 
 
+def get_logger(name):
+    """Creates and initializes the logger."""
+    log = logging.getLogger(name) # create logger @ info lvl
+    log.setLevel(logging.INFO)
+    sh = logging.StreamHandler()    # create streamhandler @ info lvl
+    sh.setLevel(logging.INFO)
+    sh.setFormatter(RelativeFormatter())    # add custom formatter
+    log.addHandler(sh)
+    return log
+
+def count_lines(filename):
+    """Returns the number of lines in the specified file."""
+    try:
+        f = open(filename)
+        return sum(1 for line in f)
+    except IOError:
+        log.error("Error: could not read in file!")
+        os._exit(-1)
+
+###
+#
+# The threads for:
+#   loading the hosts
+#   dispatching the hosts to the modules
+#   saving the results
+#
+###
+
+def Load(filename):
+    global number_of_hosts
+    try:
+        input_file = open(filename, "r")
+        # count the host number before loading
+        number_of_hosts = sum(1 for line in input_file)
+        input_file.seek(0)
+
+        while True:
+            host = input_file.readline().strip().split()
+            if not host:
+                break
+            Qin.put(host)
+        input_file.close()
+
+        # when done, signal the end
+        for i in range(THREAD_NUM):
+            Qin.put(None)
+        log.info("Finished loading hosts.")
+    except IOError:
+        log.error("Error: could not read in file!")
+        os._exit(-1)
+
+
+def Scan(modules, counter):
+    while True:
+        host = Qin.get()
+        Qin.task_done()
+        if not host:
+            break
+        stream = io.StringIO()
+        for m in modules:
+            m.process(host, stream)
+        stream.seek(0)
+        Qout.put(stream.read())
+        counter.inc()
+
+
+def Save():
+    global number_of_hosts
+    for i in range(number_of_hosts):
+        s = Qout.get()
+        print(s)
+
+
 ###
 #
 # The entry point
@@ -167,16 +129,7 @@ if __name__=="__main__":
         sys.exit(0)
 
     # create and initialize logger
-    log = logging.getLogger("main") # create logger @ info lvl
-    log.setLevel(logging.INFO)
-    sh = logging.StreamHandler()    # create streamhandler @ info lvl
-    sh.setLevel(logging.INFO)
-    sh.setFormatter(RelativeFormatter())    # add custom formatter
-    log.addHandler(sh)
-
-    log.info("Reading in the host list...")
-    # read in the file to process
-    host_list = load_host_list(sys.argv[1])
+    log = get_logger("main")
 
     # find module names
     log.info("Detecting modules")
@@ -199,33 +152,34 @@ if __name__=="__main__":
     for mod_name in mod_names:
         modules.append(__import__(mod_name))
 
-    # divide the hostlist into THREAD_NUM disjoint ones
-    thread_hosts = divide_array(host_list, THREAD_NUM)
+    os.chdir("..")  # reset the working directory to original
+    number_of_hosts = count_lines(sys.argv[1])
 
-    # allocate outputs
-    thread_streams = [io.StringIO() for i in range(THREAD_NUM)]
+    # start the input thread
+    log.info("Starting the loader thread...")
+    loader_thread = threading.Thread(target=Load, args=(sys.argv[1],))
+    loader_thread.start()
 
-    # start the threads
-    threads = []
-    counter = IntWrapper(0, len(host_list))
+    # start the output thread
+    log.info("Starting the output thread...")
+    saver_thread = threading.Thread(target=Save)
+    saver_thread.start()
+
+    # start the worker threads
+    worker_threads = []
+    counter = IntWrapper(0, number_of_hosts)
     log.info("Starting the scan...")
     for i in range(THREAD_NUM):
-        thread = threading.Thread(
-                    target=Scan,
-                    args=(modules, thread_hosts[i], thread_streams[i], counter)
-                )
+        thread = threading.Thread(target=Scan, args=(modules, counter))
         thread.start()
-        threads.append(thread)
+        worker_threads.append(thread)
 
-    # wait for them to finish
-    for thread in threads:
+
+    # collect the threads
+    for thread in worker_threads:
         thread.join()
+    loader_thread.join()
+    saver_thread.join()
 
-    # join and print the resulting outputs
-    s = ""
-    for stream in thread_streams:
-        stream.seek(0)
-        s += stream.read()
 
     log.info("Done.")
-    print(s)
