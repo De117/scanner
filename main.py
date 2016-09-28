@@ -8,11 +8,13 @@ import time
 import io
 import sys
 import os
+import importlib
 import socket
 import logging
 THREAD_NUM = 200
 PRINT_FREQ = 10
 MAX_Q_SIZE = 200
+module_names = ["sslmodule"]
 
 Qin = queue.Queue(MAX_Q_SIZE)
 Qout = queue.Queue(MAX_Q_SIZE)
@@ -131,28 +133,13 @@ if __name__=="__main__":
     # create and initialize logger
     log = get_logger("main")
 
-    # find module names
-    log.info("Detecting modules")
-    try:
-        mod_names = [x for x in os.listdir("./modules")
-                        if x[0]!="." and x.endswith(".py")]
-        mod_names = [x for x in mod_names if not x.startswith("test")]
-        mod_names = [os.path.splitext(x)[0] for x in mod_names]
-    except FileNotFoundError:
-        print("Error: cannot load modules, or no modules to load!",
-                file=sys.stderr)
-        sys.exit(-1)
-
     # load modules
+    log.info("Loading modules...")
+    sys.path.append("./modules")    # add modules directory to search path
     modules = []
-    os.chdir("./modules")
-    sys.path.append(".")    # necessary for proper importing
-                            # details at mail.python.org/pipermail
-                            #  /python-bugs-list/2004-June/023835.html
-    for mod_name in mod_names:
-        modules.append(__import__(mod_name))
+    for name in module_names:
+        modules.append(importlib.import_module(name))
 
-    os.chdir("..")  # reset the working directory to original
     number_of_hosts = count_lines(sys.argv[1])
 
     # start the input thread
