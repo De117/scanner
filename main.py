@@ -11,10 +11,12 @@ import os
 import importlib
 import socket
 import logging
+import sqlite3
 THREAD_NUM = 200
 PRINT_FREQ = 10
 MAX_Q_SIZE = 200
 module_names = ["sslmodule"]
+DB_NAME = "results.db"
 
 Qin = queue.Queue(MAX_Q_SIZE)
 Qout = queue.Queue(MAX_Q_SIZE)
@@ -103,19 +105,28 @@ def Scan(modules, counter):
         Qin.task_done()
         if not host:
             break
-        stream = io.StringIO()
+        host_results = []
         for m in modules:
-            m.process(host, stream)
-        stream.seek(0)
-        Qout.put(stream.read())
+            host_results.append( m.process(host) )
+        Qout.put(host_results)
         counter.inc()
 
 
 def Save():
     global number_of_hosts
+
+    # open the database and initialize if needed
+    connection = sqlite3.connect(DB_NAME, isolation_level=None)
+    cursor = connection.cursor()
+    for module in modules:
+        module.init_db_tables(cursor)
+
+    cursor.execute("BEGIN TRANSACTION;")
     for i in range(number_of_hosts):
-        s = Qout.get()
-        print(s)
+        host_results = Qout.get()
+        for rec in host_results:
+            rec.add_to_DB(cursor)
+    connection.commit()
 
 
 ###

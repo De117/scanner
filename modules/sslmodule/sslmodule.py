@@ -4,6 +4,8 @@
 import sys
 import ssl
 import socket
+import time
+import datetime
 DETECT_CIPHERS = True
 DEFAULT_TIMEOUT = 5.0
 
@@ -43,7 +45,70 @@ def get_supported_ciphers(dest, protocol):
     return chosen_ciphers
 
 
-def process(host, stream):
+class ProtocolSuites:
+    """A class for storing the name and the supported cipher suites 
+        of a single protocol."""
+    def __init__(self, protocol_name):
+        self.name = protocol_name
+        self.cipher_suites = []
+
+    def add_cipher_suite(self, suite):
+        if suite not in self.cipher_suites:
+            self.cipher_suites.append( suite )
+
+    def __eq__(self, other):
+        return self.name == other.name \
+                and self.cipher_suites == other.cipher_suites
+
+    def __bool__(self):
+        if not self.name:
+            return False
+        return bool(self.cipher_suites)
+
+
+class Record:
+    """A class for storing the results of a single scan."""
+    def __init__(self, host):
+        self.hostname, self.IP = host
+        self.protocols = []
+        self.timestamp = int(time.time())
+
+    def add_protocol(self, protocol):
+        if protocol not in self.protocols:
+            self.protocols.append( protocol )
+
+    def add_to_DB(self, db_cursor):
+        cmd = "INSERT INTO sslmodule VALUES (?,?,?,?);"
+        for protocol in self.protocols:
+            for csuite in protocol.cipher_suites:
+                db_cursor.execute(cmd,
+                    (self.timestamp, self.IP, protocol.name, csuite))
+        
+
+    def __str__(self):
+        s = "host: " + self.hostname + "\n"
+        s += "IP: " + self.IP + "\n"
+        s += "timestamp: " + datetime.datetime \
+                                     .fromtimestamp(self.timestamp) \
+                                     .isoformat(" ") + "\n"
+        s += "supports:\n"
+        for proto in self.protocols:
+            s += "  "+proto.name+"\n"
+            for cipher in proto.cipher_suites:
+                s += "    "+cipher+"\n"
+
+        return s
+
+def init_db_tables(db_cursor):
+    """Create the necessary database tables, if they do not already exist."""
+    db_cursor.execute("CREATE TABLE IF NOT EXISTS sslmodule(\n"+\
+                      "    ip TEXT,\n"+\
+                      "    timestamp INTEGER,\n"+\
+                      "    hostname TEXT,\n"+\
+                      "    cipher_suite TEXT);")
+
+
+def process(host):
     hostname, IP = host
     if (hostname=="?"):
         dest = (IP, 443)
@@ -54,9 +119,7 @@ def process(host, stream):
     # a dictionary to record the supported protocols
     supported = {}
 
-    print("\nhost: "+hostname, file=stream)
-    print("IPs: "+IP, file=stream)
-    print("supports: ", file=stream)
+    record = Record(host)
 
     # detect supported protocol versions
     for proto_key in ssl._PROTOCOL_NAMES.keys():
@@ -68,13 +131,12 @@ def process(host, stream):
         except OSError:
             supported[proto_key] = False
 
-        # print out supported protocol versions
         if (supported[proto_key]):
-            print("  "+ssl._PROTOCOL_NAMES[proto_key]+": YES", file=stream)
+            protocol = ProtocolSuites(ssl._PROTOCOL_NAMES[proto_key])
             # detect supported ciphers
             if (DETECT_CIPHERS):
                 supported_ciphers = get_supported_ciphers(dest, proto_key)
                 for cipher in supported_ciphers:
-                    print("    "+cipher, file=stream)
-        else:
-            print("  "+ssl._PROTOCOL_NAMES[proto_key]+": NO", file=stream)
+                    protocol.add_cipher_suite(cipher)
+                record.add_protocol(protocol)
+    return record
