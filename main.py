@@ -90,37 +90,23 @@ def count_lines(filename):
 ###
 
 def Load(filename):
+    global number_of_hosts, counter
+    try:
+        input_file = open(filename, "r")
+        host_list = [line.strip().split() for line in input_file]
+        input_file.close()
+        log.info("Finished loading hosts.")
+    except IOError:
+        log.error("Error: could not read in file!")
+        os._exit(-1)
 
-    def single_load(filename):
-        try:
-            input_file = open(filename, "r")
-            host_list = [line.strip().split() for line in input_file]
-            input_file.close()
-            log.info("Finished loading hosts.")
-        except IOError:
-            log.error("Error: could not read in file!")
-            os._exit(-1)
+    # update the host number, reset counter
+    number_of_hosts = len(host_list)
+    counter = IntWrapper(0, number_of_hosts, PRINT_FREQ)
+    file_loaded.set()
 
-        # update the host number, reset counter
-        global number_of_hosts, counter
-        number_of_hosts = len(host_list)
-        counter = IntWrapper(0, number_of_hosts, PRINT_FREQ)
-        file_loaded.set()
-
-        for host in host_list:
-            Qscan.put(host)
-
-    while True:
-        single_load(filename)
-        # wait for this batch to finish
-        saving_done.wait()
-        saving_done.clear()
-        if not REPEAT:
-            break
-
-    # when done, signal the end
-    for i in range(THREAD_NUM):
-        Qscan.put(None)
+    for host in host_list:
+        Qscan.put(host)
 
 
 def Scan(modules):
@@ -139,30 +125,25 @@ def Scan(modules):
 
 def Save():
 
-    def single_save():
-        # open the database and initialize if needed
-        connection = sqlite3.connect(DB_NAME, isolation_level=None)
-        cursor = connection.cursor()
-        for module in modules:
-            module.init_db_tables(cursor)
+    # open the database and initialize if needed
+    connection = sqlite3.connect(DB_NAME, isolation_level=None)
+    cursor = connection.cursor()
+    for module in modules:
+        module.init_db_tables(cursor)
 
-        # wait until global vars are initialized
-        file_loaded.wait()
-        file_loaded.clear()
+    # wait until global vars are initialized
+    file_loaded.wait()
+    file_loaded.clear()
 
-        cursor.execute("BEGIN TRANSACTION;")
-        for i in range(number_of_hosts):
-            host_results = Qsave.get()
-            for rec in host_results:
-                rec.add_to_DB(cursor)
+    cursor.execute("BEGIN TRANSACTION;")
+    for i in range(number_of_hosts):
+        host_results = Qsave.get()
+        for rec in host_results:
+            rec.add_to_DB(cursor)
 
-        connection.commit()
-        connection.close()
-        saving_done.set()
-
-    single_save()
-    while REPEAT:
-        single_save()
+    connection.commit()
+    connection.close()
+    saving_done.set()
 
 
 ###
@@ -205,16 +186,30 @@ if __name__=="__main__":
 
     while True:
         try:
-            # collect the remaining threads
             loader_thread.join()
             saver_thread.join()
-            for thread in worker_threads:
-                thread.join()
-            break
         except KeyboardInterrupt:
             log.info("Received KeyboardInterrupt, setting REPEAT to False...")
             REPEAT = False
+            continue
             #os._exit(-1)
+
+        # hope the user doesn't send KeyboardInterrupt *precisely* during 
+        #  the execution of these if-else branches
+        # if he does, though, it'll quit the program instead of messing up
+        #  the program state.
+
+        if REPEAT:
+            loader_thread = threading.Thread(target=Load, args=(sys.argv[1],))
+            saver_thread = threading.Thread(target=Save)
+            loader_thread.start()
+            saver_thread.start()
+        else:
+            for i in range(THREAD_NUM):
+                Qscan.put(None)
+            for thread in worker_threads:
+                thread.join()
+            break
 
 
     log.info("Done.")
