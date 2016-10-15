@@ -12,19 +12,14 @@ import importlib
 import socket
 import logging
 import sqlite3
-THREAD_NUM = 200
-PRINT_FREQ = 10
-MAX_Q_SIZE = 200
+import argparse
+from options import options
 module_names = ["sslmodule"]
-DB_NAME = "results.db"
-REPEAT = True
 
-Qscan = queue.Queue(MAX_Q_SIZE)
-Qsave = queue.Queue(MAX_Q_SIZE)
 number_of_hosts = None
 
 file_loaded = threading.Event()
-saving_done = threading.Event()
+SUSPEND = False
 
 class RelativeFormatter(logging.Formatter):
     """A custom formatter.
@@ -70,15 +65,13 @@ def load_modules(module_names):
         modules.append(importlib.import_module(name))
     return modules
 
+def dump_hosts_to_file(i, hosts, filename):
+    with open(filename, "w") as f:
+        print(i, file=f)
+        for host in hosts:
+            print(host[0]+" "+host[1], file=f)
 
-def count_lines(filename):
-    """Returns the number of lines in the specified file."""
-    try:
-        f = open(filename)
-        return sum(1 for line in f)
-    except IOError:
-        log.error("Error: could not read in file!")
-        os._exit(-1)
+
 
 ###
 #
@@ -89,24 +82,38 @@ def count_lines(filename):
 #
 ###
 
-def Load(filename):
+def Load(filename, resuming=False):
     global number_of_hosts, counter
     try:
         input_file = open(filename, "r")
+        zero = int(input_file.readline()) if resuming else 0
         host_list = [line.strip().split() for line in input_file]
         input_file.close()
-        log.info("Finished loading hosts.")
+        log.info("Loaded hosts from file.")
     except IOError:
         log.error("Error: could not read in file!")
         os._exit(-1)
 
     # update the host number, reset counter
     number_of_hosts = len(host_list)
-    counter = IntWrapper(0, number_of_hosts, PRINT_FREQ)
+    counter = IntWrapper(zero, zero + number_of_hosts, conf.PRINT_FREQ)
+    if resuming:
+        log.info("Resuming suspended scan; %d/%d hosts scanned"
+                %(zero, counter.total))
+
     file_loaded.set()
 
-    for host in host_list:
-        Qscan.put(host)
+    for i in range(len(host_list)):
+        if not SUSPEND:
+            Qscan.put(host_list[i])
+        else:
+            number_of_hosts = i
+            log.info("Dumping unscanned hosts to " + conf.SUSP_FILENAME)
+            dump_hosts_to_file(zero + i, host_list[i:], conf.SUSP_FILENAME)
+            log.info("Unscanned hosts dumped.\n"
+                     "Please wait while the scans already in progress finish.")
+            return
+
 
 
 def Scan(modules):
@@ -126,7 +133,7 @@ def Scan(modules):
 def Save():
 
     # open the database and initialize if needed
-    connection = sqlite3.connect(DB_NAME, isolation_level=None)
+    connection = sqlite3.connect(conf.DB_FILENAME, isolation_level=None)
     cursor = connection.cursor()
     for module in modules:
         module.init_db_tables(cursor)
@@ -136,14 +143,15 @@ def Save():
     file_loaded.clear()
 
     cursor.execute("BEGIN TRANSACTION;")
-    for i in range(number_of_hosts):
+    i=0
+    while i < number_of_hosts:
         host_results = Qsave.get()
         for rec in host_results:
             rec.add_to_DB(cursor)
+        i+=1
 
     connection.commit()
     connection.close()
-    saving_done.set()
 
 
 ###
@@ -154,20 +162,42 @@ def Save():
 
 if __name__=="__main__":
 
-    if len(sys.argv) != 2:
-        print("Usage: "+sys.argv[0]+" host_list")
-        sys.exit(0)
+    parser = argparse.ArgumentParser()
+    for option in options:
+        parser.add_argument(*option[0], **option[1])
+    conf = parser.parse_args()
 
-    # create and initialize logger
+    # do additional checks
+    if conf.THREAD_NUM < 1:
+        parser.error("thread number must be at least 1")
+    elif conf.PRINT_FREQ < 1:
+        parser.error("print frequency must be greater than zero")
+    elif conf.MAX_Q_SIZE < 1:
+        parser.error("queue size must be at least 1")
+
+    # create and initialize logger, queues
     log = get_logger("main")
+    Qscan = queue.Queue(conf.MAX_Q_SIZE)
+    Qsave = queue.Queue(conf.MAX_Q_SIZE)
 
     # load modules
     log.info("Loading modules...")
     modules = load_modules(module_names)
 
+    # start the worker threads
+    worker_threads = []
+    log.info("Starting the scanner threads...")
+    for i in range(conf.THREAD_NUM):
+        thread = threading.Thread(target=Scan, args=(modules,))
+        thread.start()
+        worker_threads.append(thread)
+
     # start the input thread
     log.info("Starting the loader thread...")
-    loader_thread = threading.Thread(target=Load, args=(sys.argv[1],))
+    if not conf.STATE_FILE:
+        loader_thread = threading.Thread(target=Load, args=(sys.argv[1],))
+    else:
+        loader_thread = threading.Thread(target=Load, args=(conf.STATE_FILE, True))
     loader_thread.start()
 
     # start the output thread
@@ -175,37 +205,33 @@ if __name__=="__main__":
     saver_thread = threading.Thread(target=Save)
     saver_thread.start()
 
-    # start the worker threads
-    worker_threads = []
-    log.info("Starting the scan...")
-    for i in range(THREAD_NUM):
-        thread = threading.Thread(target=Scan, args=(modules,))
-        thread.start()
-        worker_threads.append(thread)
-
-
     while True:
         try:
             loader_thread.join()
             saver_thread.join()
         except KeyboardInterrupt:
-            log.info("Received KeyboardInterrupt, setting REPEAT to False...")
-            REPEAT = False
+            try:
+                conf.REPEAT = False
+                log.warning("Received KeyboardInterrupt, set REPEAT to off.\n"
+                            "Send again within 3s to suspend execution")
+                time.sleep(3)
+            except KeyboardInterrupt:
+                SUSPEND = True
+                log.warning("Suspending...")
             continue
-            #os._exit(-1)
 
-        # hope the user doesn't send KeyboardInterrupt *precisely* during 
+        # hope the user doesn't send KeyboardInterrupt *precisely* during
         #  the execution of these if-else branches
         # if he does, though, it'll quit the program instead of messing up
         #  the program state.
 
-        if REPEAT:
+        if conf.REPEAT:
             loader_thread = threading.Thread(target=Load, args=(sys.argv[1],))
             saver_thread = threading.Thread(target=Save)
             loader_thread.start()
             saver_thread.start()
         else:
-            for i in range(THREAD_NUM):
+            for i in range(conf.THREAD_NUM):
                 Qscan.put(None)
             for thread in worker_threads:
                 thread.join()
