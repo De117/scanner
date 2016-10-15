@@ -2,7 +2,9 @@
 # -*- coding: utf-8 -*-
 
 import threading, io, sys, socket, math
-from main import get_logger, THREAD_NUM, PRINT_FREQ
+from main import get_logger
+THREAD_NUM = 200
+PRINT_FREQ = 10
 
 def load_host_list(filename):
     """Loads the list of hosts to test, looking up the missing parts.
