@@ -6,8 +6,10 @@ import ssl
 import socket
 import time
 import datetime
+import threading
 DETECT_CIPHERS = True
 DEFAULT_TIMEOUT = 5.0
+TABLE_NAME = "scan_results"
 
 
 def make_ssocket(protocol, ciphers=ssl._DEFAULT_CIPHERS):
@@ -15,6 +17,7 @@ def make_ssocket(protocol, ciphers=ssl._DEFAULT_CIPHERS):
     return ssl.wrap_socket( socket.socket(),
                             ssl_version=protocol,
                             ciphers=ciphers)
+
 
 def get_supported_ciphers(dest, protocol):
     """Returns a list of ciphers supported by a host.
@@ -46,7 +49,7 @@ def get_supported_ciphers(dest, protocol):
 
 
 class ProtocolSuites:
-    """A class for storing the name and the supported cipher suites 
+    """A class for storing the name and the supported cipher suites
         of a single protocol."""
     def __init__(self, protocol_name):
         self.name = protocol_name
@@ -78,12 +81,11 @@ class Record:
             self.protocols.append( protocol )
 
     def add_to_DB(self, db_cursor):
-        cmd = "INSERT INTO sslmodule VALUES (?,?,?,?);"
+        cmd = "INSERT INTO {} VALUES (?,?,?,?);".format(TABLE_NAME)
         for protocol in self.protocols:
             for csuite in protocol.cipher_suites:
                 db_cursor.execute(cmd,
                     (self.timestamp, self.IP, protocol.name, csuite))
-        
 
     def __str__(self):
         s = "host: " + self.hostname + "\n"
@@ -99,12 +101,13 @@ class Record:
 
         return s
 
+
 def init_db_tables(db_cursor):
     """Create the necessary database tables, if they do not already exist."""
-    db_cursor.execute("CREATE TABLE IF NOT EXISTS sslmodule(\n"+\
-                      "    ip TEXT,\n"+\
-                      "    timestamp INTEGER,\n"+\
-                      "    hostname TEXT,\n"+\
+    db_cursor.execute("CREATE TABLE IF NOT EXISTS "+TABLE_NAME+"(\n"
+                      "    ip TEXT,\n"
+                      "    timestamp INTEGER,\n"
+                      "    hostname TEXT,\n"
                       "    cipher_suite TEXT);")
 
 
@@ -140,3 +143,19 @@ def process(host):
                     protocol.add_cipher_suite(cipher)
                 record.add_protocol(protocol)
     return record
+
+
+class SSLTester(threading.Thread):
+
+    def __init__(self, target_feed, results_feed):
+        threading.Thread.__init__(self)
+        self.target_feed = target_feed
+        self.results_feed = results_feed
+
+    def run(self):
+        for target in self.target_feed:
+            res = self._scan(target)
+            self.results_feed.put(res)
+
+    def _scan(self, target):
+        return process(target)

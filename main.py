@@ -2,28 +2,19 @@
 # -*- coding: utf-8 -*-
 
 import threading
-import queue
-import math
 import time
-import io
 import sys
 import os
-import importlib
-import socket
 import logging
 import sqlite3
 import argparse
+import json
 from options import options
-module_names = ["sslmodule"]
+from SSLTester import SSLTester, init_db_tables as init_db_tables
 
-number_of_hosts = None
-
-file_loaded = threading.Event()
-SUSPEND = False
 
 class RelativeFormatter(logging.Formatter):
     """A custom formatter.
-    
     Adds elapsed time (in seconds.milliseconds) in front of the message.
     """
     def format(self, record):
@@ -31,24 +22,8 @@ class RelativeFormatter(logging.Formatter):
         return "[%.4f] "%(record.relativeCreated/1000) + ret
 
 
-class IntWrapper:
-    """A threadsafe wrapper for an integer, for use as a counter."""
-    def __init__(self, initial_value=0, total=0, print_frequency=None):
-        self.value = initial_value
-        self.total = total
-        self.print_freq = print_frequency
-        self.lock = threading.Lock()
-
-    def inc(self):
-        with self.lock:
-            self.value += 1
-            if self.print_freq and (self.value % self.print_freq == 0
-                                    or self.value == self.total):
-                log.info("\t%d/%d" % (self.value, self.total))
-
-
 def get_logger(name):
-    """Creates and initializes the logger."""
+    """Create and initialize the logger."""
     log = logging.getLogger(name) # create logger @ info lvl
     log.setLevel(logging.INFO)
     sh = logging.StreamHandler()    # create streamhandler @ info lvl
@@ -58,35 +33,98 @@ def get_logger(name):
     return log
 
 
-def load_modules(module_names):
-    modules = []
-    sys.path.append("./modules")    # add modules directory to search path
-    for name in module_names:
-        modules.append(importlib.import_module(name))
-    return modules
+# --------------------
+#  queue-like classes
+# --------------------
 
-def dump_hosts_to_file(i, hosts, filename):
-    with open(filename, "w") as f:
-        print(i, file=f)
-        for host in hosts:
-            print(host[0]+" "+host[1], file=f)
+class Feeder:
+    """An iterable queue-like class for feeding/providing the hosts one by one."""
+
+    def __init__(self, host_list):
+        self.host_list = host_list
+        self.index = 0
+        self.lock = threading.RLock()
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        with self.lock:
+            if self.index >= len(self.host_list):
+                raise StopIteration
+
+            self.index += 1
+            return self.host_list[self.index-1]
+
+    def stop(self):
+        """Stop the feeder from producing any more hosts.
+           Returns the number of hosts already produced."""
+        with self.lock:
+            _index = self.index
+            self.index = len(self.host_list)
+            return _index
+
+    def reset(self, index=0):
+        """Reset the feeder to the position given by `index`."""
+        with self.lock:
+            self.index = index
 
 
+class Receiver:
+    """A container for receiving the scan results one by one."""
 
-###
-#
-# The threads for:
-#   loading the hosts
-#   dispatching the hosts to the modules
-#   saving the results
-#
-###
+    def __init__(self):
+        self.results = []
+        self.lock = threading.RLock()
+        self.flushed_until = 0          # prevents storing a value twice
 
-def Load(filename, resuming=False):
-    global number_of_hosts, counter
+    def put(self, item):
+        """Store the given item in the container."""
+        with self.lock:
+            self.results.append( item )
+            num = len(self.results)
+
+            if num % conf.PRINT_FREQ==0:
+                log.info("\tScanned {} hosts".format(num))
+
+    def flush_to_db(self):
+        """Flush the new scan results to the database."""
+        # open the database and initialize if needed
+        connection = sqlite3.connect(conf.DB_FILENAME, isolation_level=None)
+        cursor     = connection.cursor()
+        init_db_tables(cursor)
+        cursor.execute("BEGIN TRANSACTION;")
+
+        with self.lock:
+            for rec in self.results[self.flushed_until:]:
+                rec.add_to_DB(cursor)
+            flushed_until = len(self.results)
+
+        connection.commit();
+        connection.close()
+
+    def clear(self):
+        """Clear (delete) all stored items."""
+        with self.lock:
+            self.results = []
+            self.flushed_until = 0
+
+    def suspend(self):
+        """Flush to DB and return the number of hosts scanned so far."""
+        with self.lock:
+            self.flush_to_db()
+            hosts_scanned = len(self.results)
+            return hosts_scanned
+
+
+# -------------------------
+#  state-related functions
+# -------------------------
+
+def load_host_list(filename):
+    """Load the host list from disk, and die in case of failure."""
     try:
         input_file = open(filename, "r")
-        zero = int(input_file.readline()) if resuming else 0
         host_list = [line.strip().split() for line in input_file]
         input_file.close()
         log.info("Loaded hosts from file.")
@@ -94,71 +132,44 @@ def Load(filename, resuming=False):
         log.error("Error: could not read in file!")
         os._exit(-1)
 
-    # update the host number, reset counter
-    number_of_hosts = len(host_list)
-    counter = IntWrapper(zero, zero + number_of_hosts, conf.PRINT_FREQ)
-    if resuming:
-        log.info("Resuming suspended scan; %d/%d hosts scanned"
-                %(zero, counter.total))
-
-    file_loaded.set()
-
-    for i in range(len(host_list)):
-        if not SUSPEND:
-            Qscan.put(host_list[i])
-        else:
-            number_of_hosts = i
-            log.info("Dumping unscanned hosts to " + conf.SUSP_FILENAME)
-            dump_hosts_to_file(zero + i, host_list[i:], conf.SUSP_FILENAME)
-            log.info("Unscanned hosts dumped.\n"
-                     "Please wait while the scans already in progress finish.")
-            return
+    return host_list
 
 
+def suspend_state(feeder, receiver):
+    """Stop everything, dump unscanned hosts to disk, and exit.
+       This function never returns.
+    """
+    hosts_issued = feeder.stop()
+    hosts_scanned = receiver.suspend()
 
-def Scan(modules):
-    global counter
-    while True:
-        host = Qscan.get()
-        Qscan.task_done()
-        if not host:
-            break
-        host_results = []
-        for m in modules:
-            host_results.append( m.process(host) )
-        Qsave.put(host_results)
-        counter.inc()
+    log.info("Stopping everything, dumping state to disk...")
+    to_dump = feeder.host_list[hosts_scanned:]
 
+    with open(conf.SUSP_FILENAME, "w") as f:
+        json.dump([hosts_scanned, to_dump], f)
 
-def Save():
-
-    # open the database and initialize if needed
-    connection = sqlite3.connect(conf.DB_FILENAME, isolation_level=None)
-    cursor = connection.cursor()
-    for module in modules:
-        module.init_db_tables(cursor)
-
-    # wait until global vars are initialized
-    file_loaded.wait()
-    file_loaded.clear()
-
-    cursor.execute("BEGIN TRANSACTION;")
-    i=0
-    while i < number_of_hosts:
-        host_results = Qsave.get()
-        for rec in host_results:
-            rec.add_to_DB(cursor)
-        i+=1
-
-    connection.commit()
-    connection.close()
+    log.info("State dumped. Exiting.")
+    os._exit(-1)
 
 
-###
-#
-# The entry point
-#
-###
+def load_state():
+    """Load state from disk.
+    Returns a Feeder with the remaining hosts, a new Receiver,
+    and the number of hosts that were scanned during the last run.
+    """
+    with open(conf.STATE_FILE) as f:
+        hosts_scanned, host_list = json.load(f)
+
+    feeder = Feeder(host_list)
+    receiver = Receiver()
+
+    return feeder, receiver, hosts_scanned
+
+
+
+############################################################
+
+
 
 if __name__=="__main__":
 
@@ -175,67 +186,65 @@ if __name__=="__main__":
     elif conf.MAX_Q_SIZE < 1:
         parser.error("queue size must be at least 1")
 
-    # create and initialize logger, queues
     log = get_logger("main")
-    Qscan = queue.Queue(conf.MAX_Q_SIZE)
-    Qsave = queue.Queue(conf.MAX_Q_SIZE)
 
-    # load modules
-    log.info("Loading modules...")
-    modules = load_modules(module_names)
 
-    # start the worker threads
-    worker_threads = []
-    log.info("Starting the scanner threads...")
-    for i in range(conf.THREAD_NUM):
-        thread = threading.Thread(target=Scan, args=(modules,))
-        thread.start()
-        worker_threads.append(thread)
-
-    # start the input thread
-    log.info("Starting the loader thread...")
-    if not conf.STATE_FILE:
-        loader_thread = threading.Thread(target=Load, args=(sys.argv[1],))
+    if conf.STATE_FILE:
+        target_feed, results_feed, hosts_scanned = load_state()
+        log.info("Resuming scan; {} hosts scanned last time, {} remaining"
+                .format(hosts_scanned, len(target_feed.host_list)))
     else:
-        loader_thread = threading.Thread(target=Load, args=(conf.STATE_FILE, True))
-    loader_thread.start()
+        host_list = load_host_list(sys.argv[1])     # load host list
+        target_feed = Feeder(host_list)             # input queue
+        results_feed = Receiver()                   # output queue
+        log.info("Starting scan; {} hosts remaining".format(len(host_list)))
 
-    # start the output thread
-    log.info("Starting the output thread...")
-    saver_thread = threading.Thread(target=Save)
-    saver_thread.start()
 
     while True:
-        try:
-            loader_thread.join()
-            saver_thread.join()
-        except KeyboardInterrupt:
+
+        # start the worker threads
+        threads = []
+        log.info("Starting the scanner threads...")
+        for i in range(conf.THREAD_NUM):
+            thread = SSLTester(target_feed, results_feed)
+            thread.start()
+            threads.append(thread)
+        log.info("Started all threads.\nPress Ctrl+C to set REPEAT to off")
+
+        # wait for them to finish (and watch for Ctrl+C)
+        while True:
             try:
-                conf.REPEAT = False
-                log.warning("Received KeyboardInterrupt, set REPEAT to off.\n"
-                            "Send again within 3s to suspend execution")
-                time.sleep(3)
+                for thread in threads:
+                    thread.join()
+                log.info("Joined all threads.")
+                break
+
             except KeyboardInterrupt:
-                SUSPEND = True
-                log.warning("Suspending...")
-            continue
+                # handle suspension
+                try:
+                    conf.REPEAT = False
+                    log.warning(
+                        "Received KeyboardInterrupt, set REPEAT to off.\n"
+                        "Send again within 3s to suspend execution.")
+                    time.sleep(3)
+                except KeyboardInterrupt:
+                    log.warning("Suspending state...")
+                    suspend_state(target_feed, results_feed)
+                    # `suspend_state` will not return.
 
-        # hope the user doesn't send KeyboardInterrupt *precisely* during
-        #  the execution of these if-else branches
-        # if he does, though, it'll quit the program instead of messing up
-        #  the program state.
 
-        if conf.REPEAT:
-            loader_thread = threading.Thread(target=Load, args=(sys.argv[1],))
-            saver_thread = threading.Thread(target=Save)
-            loader_thread.start()
-            saver_thread.start()
-        else:
-            for i in range(conf.THREAD_NUM):
-                Qscan.put(None)
-            for thread in worker_threads:
-                thread.join()
+        # store results in the DB, clear the queues/buffers
+        results_feed.flush_to_db()
+        results_feed.clear()
+        target_feed.reset()
+
+        if not conf.REPEAT:
             break
 
+        # load everything anew
+        host_list = load_host_list(sys.argv[1])     # load host list
+        target_feed = Feeder(host_list)             # input queue
+        results_feed = Receiver()                   # output queue
+        log.info("\nRepeating scan; {} hosts remaining".format(len(host_list)))
 
     log.info("Done.")
