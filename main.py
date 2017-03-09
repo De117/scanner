@@ -186,6 +186,9 @@ if __name__=="__main__":
     elif conf.MAX_Q_SIZE < 1:
         parser.error("queue size must be at least 1")
 
+    if conf.REPEAT_DELAY:
+        conf.REPEAT = True
+
     log = get_logger("main")
 
 
@@ -240,6 +243,10 @@ if __name__=="__main__":
 
         if not conf.REPEAT:
             break
+        elif conf.REPEAT_DELAY:
+            delay = conf.REPEAT_DELAY
+            log.info("Sleeping for {} seconds before next scan".format(delay))
+            time.sleep(delay)
 
         # load everything anew
         host_list = load_host_list(sys.argv[1])     # load host list

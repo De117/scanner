@@ -42,4 +42,11 @@ options = [
     "action"    : "store_true",
 	"dest"		: "REPEAT",
     "default"   : False}),
+    ([ "--with-delay" ],
+    {"help"     : "set delay between repeated scans, in seconds; "
+                  "this implies --repeat",
+    "metavar"   : "REPEAT_DELAY",
+    "dest"      : "REPEAT_DELAY",
+    "type"      : int,
+    "default"   : 0}),
 ]
