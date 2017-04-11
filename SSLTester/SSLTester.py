@@ -7,6 +7,8 @@ import socket
 import time
 import datetime
 import threading
+import asn1crypto
+import requests
 DETECT_CIPHERS = True
 DEFAULT_TIMEOUT = 5.0
 TABLE_NAME = "scan_results"
@@ -46,6 +48,49 @@ def get_supported_ciphers(dest, protocol):
             #  it means we've enumerated all the supported ones
             break
     return chosen_ciphers
+
+
+def get_certificate(dest):
+    """Returns a DER-encoded certificate (as a bytes object).
+
+    Arguments:
+            dest -- the (IP, port) to connect to
+    """
+    try:
+        ssock = make_ssocket(ssl.PROTOCOL_SSLv23)  # connects to SSLv3+
+        ssock.connect(dest)
+        der_cert = ssock.getpeercert(binary_form=True)
+        ssock.close()
+        return der_cert
+    except OSError:
+        pass    # TODO?
+    #c = asn1crypto.x509.Certificate.load(der_cert)
+
+
+def get_HTTP_header_fields(url, fieldnames):
+    """Returns the contents of the specified HTTP response header fields.
+
+    Arguments:
+        url -- the website to check (in the form '[xyz://]www.example.com/')
+        fieldnames -- a list of header field names; can be a single string,
+                      in which case it is treated like a list of length one
+
+    Returns:
+        field_contents -- a mapping (dict) from fieldnames to their values;
+                          empty in case of error or if there are no headers
+    """
+    url = "https://" + url.split("//", maxsplit=1)[-1]
+    if type(fieldnames) is str:
+        fieldnames = [fieldnames]
+
+    field_contents = {}
+
+    try:
+        resp = requests.head(url, allow_redirects=True)
+    except requests.RequestException as e:
+        return {}
+
+    return {k:v for (k,v) in resp.headers.items() if k in fieldnames}
 
 
 class ProtocolSuites:
@@ -142,6 +187,18 @@ def process(host):
                 for cipher in supported_ciphers:
                     protocol.add_cipher_suite(cipher)
                 record.add_protocol(protocol)
+
+    # record the certificate
+    record.certificate = get_certificate(dest)
+
+    # record certain response header fields
+    fields = get_HTTP_header_fields(hostname,
+                                    ["Server",
+                                     "Strict-Transport-Security",
+                                     "Public-Key-Pins",
+                                     "Public-Key-Pins-Report-Only"])
+    record.HTTP_header_fields = fields;
+
     return record
 
 
