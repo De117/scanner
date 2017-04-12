@@ -7,7 +7,7 @@ import socket
 import time
 import datetime
 import threading
-import asn1crypto
+import asn1crypto.x509
 import requests
 DETECT_CIPHERS = True
 DEFAULT_TIMEOUT = 5.0
@@ -63,8 +63,8 @@ def get_certificate(dest):
         ssock.close()
         return der_cert
     except OSError:
-        pass    # TODO?
-    #c = asn1crypto.x509.Certificate.load(der_cert)
+        return None
+    # c = asn1crypto.x509.Certificate.load(der_cert)
 
 
 def get_HTTP_header_fields(url, fieldnames):
@@ -120,17 +120,24 @@ class Record:
         self.hostname, self.IP = host
         self.protocols = []
         self.timestamp = int(time.time())
+        self.certificate = None
 
     def add_protocol(self, protocol):
         if protocol not in self.protocols:
             self.protocols.append( protocol )
 
     def add_to_DB(self, db_cursor):
-        cmd = "INSERT INTO {} VALUES (?,?,?,?);".format(TABLE_NAME)
-        for protocol in self.protocols:
-            for csuite in protocol.cipher_suites:
-                db_cursor.execute(cmd,
-                    (self.timestamp, self.IP, protocol.name, csuite))
+        cmd = "INSERT INTO {} VALUES (?,?,?,?,?,?);".format(TABLE_NAME)
+
+        protos_string = "_$_".join([p.name for p in self.protocols])
+        csuites = set(cs for p in self.protocols for cs in p.cipher_suites)
+        csuite_string = "_$_".join(sorted(csuites))
+
+        if not protos_string: protos_string = None
+        if not csuite_string: csuite_string = None
+
+        db_cursor.execute(cmd, (self.hostname, self.IP, self.timestamp,
+                            protos_string, csuite_string, self.certificate))
 
     def __str__(self):
         s = "host: " + self.hostname + "\n"
@@ -149,11 +156,14 @@ class Record:
 
 def init_db_tables(db_cursor):
     """Create the necessary database tables, if they do not already exist."""
-    db_cursor.execute("CREATE TABLE IF NOT EXISTS "+TABLE_NAME+"(\n"
+    db_cursor.execute("CREATE TABLE IF NOT EXISTS scan_results(\n"
+                      "    hostname TEXT,\n"
                       "    ip TEXT,\n"
                       "    timestamp INTEGER,\n"
-                      "    hostname TEXT,\n"
-                      "    cipher_suite TEXT);")
+                      "    protocols TEXT,\n"
+                      "    ciphersuites TEXT,\n"
+                      "    certificate BLOB,\n"
+                      "    PRIMARY KEY (hostname, timestamp));")
 
 
 def process(host):
