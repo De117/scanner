@@ -93,32 +93,12 @@ def get_HTTP_header_fields(url, fieldnames):
     return {k:v for (k,v) in resp.headers.items() if k in fieldnames}
 
 
-class ProtocolSuites:
-    """A class for storing the name and the supported cipher suites
-        of a single protocol."""
-    def __init__(self, protocol_name):
-        self.name = protocol_name
-        self.cipher_suites = []
-
-    def add_cipher_suite(self, suite):
-        if suite not in self.cipher_suites:
-            self.cipher_suites.append( suite )
-
-    def __eq__(self, other):
-        return self.name == other.name \
-                and self.cipher_suites == other.cipher_suites
-
-    def __bool__(self):
-        if not self.name:
-            return False
-        return bool(self.cipher_suites)
-
-
 class Record:
     """A class for storing the results of a single scan."""
     def __init__(self, host):
         self.hostname, self.IP = host
         self.protocols = []
+        self.cipher_suites = []
         self.timestamp = int(time.time())
         self.certificate = None
 
@@ -126,13 +106,15 @@ class Record:
         if protocol not in self.protocols:
             self.protocols.append( protocol )
 
+    def add_cipher_suite(self, csuite):
+        if csuite not in self.cipher_suites:
+            self.cipher_suites.append( csuite )
+
     def add_to_DB(self, db_cursor):
         cmd = "INSERT INTO {} VALUES (?,?,?,?,?,?);".format(TABLE_NAME)
 
-        protos_string = "_$_".join([p.name for p in self.protocols])
-        csuites = set(cs for p in self.protocols for cs in p.cipher_suites)
-        csuite_string = "_$_".join(sorted(csuites))
-
+        protos_string = "_$_".join(self.protocols)
+        csuite_string = "_$_".join(sorted(self.cipher_suites))
         if not protos_string: protos_string = None
         if not csuite_string: csuite_string = None
 
@@ -190,13 +172,13 @@ def process(host):
             supported[proto_key] = False
 
         if (supported[proto_key]):
-            protocol = ProtocolSuites(ssl._PROTOCOL_NAMES[proto_key])
+            record.add_protocol(ssl._PROTOCOL_NAMES[proto_key])
+            # #protocol = ProtocolSuites(ssl._PROTOCOL_NAMES[proto_key])
             # detect supported ciphers
             if (DETECT_CIPHERS):
                 supported_ciphers = get_supported_ciphers(dest, proto_key)
                 for cipher in supported_ciphers:
-                    protocol.add_cipher_suite(cipher)
-                record.add_protocol(protocol)
+                    record.add_cipher_suite(cipher)
 
     # record the certificate
     record.certificate = get_certificate(dest)
