@@ -9,9 +9,11 @@ import datetime
 import threading
 import asn1crypto.x509
 import requests
+
+from SSLTester.manual import *
+
 DETECT_CIPHERS = True
 DEFAULT_TIMEOUT = 5.0
-TABLE_NAME = "scan_results"
 
 
 def make_ssocket(protocol, ciphers=ssl._DEFAULT_CIPHERS):
@@ -67,6 +69,54 @@ def get_certificate(dest):
     # c = asn1crypto.x509.Certificate.load(der_cert)
 
 
+########################################################################
+########################################################################
+########################################################################
+
+
+def get_certificate_chain(url):
+    """Returns a list of DER-encoded certificate (as bytes).
+
+    Arguments: url -- the site to connect to"""
+    try:
+        sock = socket.socket()
+        sock.connect((url, 443))
+    except OSError:
+        try:
+            time.sleep(5)
+            sock.settimeout(10)
+            sock.connect((url, 443))
+        except:
+            return []
+
+    handshake = create_handshake_record(SSLVersion.SSLv3,
+                                        [cs for cs in CipherSuite],
+                                        sni_url = url,
+                                        max_version = SSLVersion.TLSv1_2)
+
+    try:
+        sock.send(handshake)
+        time.sleep(2)             # to make sure all data has arrived
+        resp = sock.recv(100000)
+    except ConnectionError:
+        return []
+
+    # check if we actually got a handshake record
+    if resp[0:1] == RecordType.alert.value:
+        return []
+
+    while resp:
+        record, resp = extract_next_record(resp)
+        if record[0:1] == HandshakeType.certificate.value:
+            break
+        record = resp
+
+    if not record:
+        return []
+
+    return extract_certificate_chain(record)
+
+
 def get_HTTP_header_fields(url, fieldnames):
     """Returns the contents of the specified HTTP response header fields.
 
@@ -102,50 +152,94 @@ class Record:
         self.timestamp = int(time.time())
         self.certificate = None
 
+
     def add_protocol(self, protocol):
         if protocol not in self.protocols:
             self.protocols.append( protocol )
+
 
     def add_cipher_suite(self, csuite):
         if csuite not in self.cipher_suites:
             self.cipher_suites.append( csuite )
 
+
     def add_to_DB(self, db_cursor):
-        cmd = "INSERT INTO {} VALUES (?,?,?,?,?,?);".format(TABLE_NAME)
+        SQL_GET_INDEX = "SELECT COALESCE(MAX(indeks),0) FROM certificates;"
+        SQL_GET_CERT  = "SELECT indeks FROM certificates WHERE certificate = ?;"
+        SQL_INSERT_CERT = "INSERT INTO certificates VALUES (?,?);"
+        SQL_INSERT_MAIN = "INSERT INTO scan_results VALUES (?,?,?,?,?,?,?);"
 
-        protos_string = "_$_".join(self.protocols)
-        csuite_string = "_$_".join(sorted(self.cipher_suites))
-        if not protos_string: protos_string = None
-        if not csuite_string: csuite_string = None
+        certs = []
+        for cert in self.certificate_chain:   # insert any new certificates first
 
-        db_cursor.execute(cmd, (self.hostname, self.IP, self.timestamp,
-                            protos_string, csuite_string, self.certificate))
+            # get the index of next cert
+            db_cursor.execute(SQL_GET_INDEX)
+            next_index = db_cursor.fetchone()[0] + 1
+
+            # check whether cert already exists
+            db_cursor.execute(SQL_GET_CERT, (cert,));
+            index = db_cursor.fetchone()
+
+            if not index:
+                certs += [next_index]
+                db_cursor.execute(SQL_INSERT_CERT, (next_index, cert))
+                next_index += 1
+            else:
+                certs += [index[0]]
+
+        # Here, `certs` has the certificate chain as indices;
+        #  now we add the record into the main table.
+
+        protos_bytes  = SSLVersion.as_bytes(self.protocols)
+        csuite_bytes  = CipherSuite.as_bytes(self.cipher_suites)
+        cchain_string = "$".join(str(i) for i in certs)
+        HTTP_fields = "_$_".join(k+":"+v for k,v in self.HTTP_header_fields.items())
+        if not protos_bytes:  protos_bytes  = None
+        if not csuite_bytes:  csuite_bytes  = None
+        if not cchain_string: cchain_string = None
+        if not HTTP_fields:   HTTP_fields   = None
+
+
+        db_cursor.execute(SQL_INSERT_MAIN,
+                           (self.hostname, self.IP, self.timestamp,
+                            protos_bytes, csuite_bytes, cchain_string,
+                            HTTP_fields))
+
 
     def __str__(self):
         s = "host: " + self.hostname + "\n"
         s += "IP: " + self.IP + "\n"
-        s += "timestamp: " + datetime.datetime \
-                                     .fromtimestamp(self.timestamp) \
-                                     .isoformat(" ") + "\n"
+        s += "timestamp: " + datetime.datetime.fromtimestamp(self.timestamp)\
+                                              .isoformat(" ") + "\n"
         s += "supports:\n"
         for proto in self.protocols:
             s += "  "+proto.name+"\n"
-            for cipher in proto.cipher_suites:
-                s += "    "+cipher+"\n"
+
+        for cipher in proto.cipher_suites:
+            s += "  "+cipher+"\n"
 
         return s
 
 
 def init_db_tables(db_cursor):
     """Create the necessary database tables, if they do not already exist."""
-    db_cursor.execute("CREATE TABLE IF NOT EXISTS scan_results(\n"
-                      "    hostname TEXT,\n"
-                      "    ip TEXT,\n"
-                      "    timestamp INTEGER,\n"
-                      "    protocols TEXT,\n"
-                      "    ciphersuites TEXT,\n"
-                      "    certificate BLOB,\n"
-                      "    PRIMARY KEY (hostname, timestamp));")
+    db_cursor.execute(
+        "CREATE TABLE IF NOT EXISTS scan_results(\n"
+        "    hostname           TEXT,\n"
+        "    ip                 TEXT,\n"
+        "    timestamp          INTEGER,\n"
+        "    protocols          BLOB,\n"
+        "    ciphersuites       BLOB,\n"
+        "    certificate_chain  TEXT,\n"
+        "    HTTP_header_fields TEXT,\n"
+        "    PRIMARY KEY (hostname, timestamp));\n"
+    )
+
+    db_cursor.execute("CREATE TABLE IF NOT EXISTS certificates(\n"
+                      "    indeks      INTEGER,\n"
+                      "    certificate BLOB);\n"
+    )
+
 
 
 def process(host):
@@ -154,6 +248,8 @@ def process(host):
         dest = (IP, 443)
     else:
         dest = (hostname, 443)
+    url = hostname
+
     # set default socket timeout
     socket.setdefaulttimeout(DEFAULT_TIMEOUT)
     # a dictionary to record the supported protocols
@@ -162,26 +258,19 @@ def process(host):
     record = Record(host)
 
     # detect supported protocol versions
-    for proto_key in ssl._PROTOCOL_NAMES.keys():
-        ssock = make_ssocket(proto_key)
-        try:
-            ssock.connect(dest)
-            ssock.close()
-            supported[proto_key] = True
-        except OSError:
-            supported[proto_key] = False
+    record.protocols = [v for v in SSLVersion if try_protocol(v, url)]
 
-        if (supported[proto_key]):
-            record.add_protocol(ssl._PROTOCOL_NAMES[proto_key])
-            # #protocol = ProtocolSuites(ssl._PROTOCOL_NAMES[proto_key])
-            # detect supported ciphers
-            if (DETECT_CIPHERS):
-                supported_ciphers = get_supported_ciphers(dest, proto_key)
-                for cipher in supported_ciphers:
-                    record.add_cipher_suite(cipher)
+    # detect supported cipher suites
+    # cs_ssl3   = scan_all_ciphers(SSLVersion.SSLv3,   url)
+    # cs_tls1   = scan_all_ciphers(SSLVersion.TLSv1,   url)
+    # cs_tls1_1 = scan_all_ciphers(SSLVersion.TLSv1_1, url)
+    cs_tls1_2 = scan_all_ciphers(SSLVersion.TLSv1_2, url)
 
-    # record the certificate
-    record.certificate = get_certificate(dest)
+    # record.cipher_suites = list(set(cs_ssl3 + cs_tls1 + cs_tls1_1 + cs_tls1_2))
+    record.cipher_suites = sorted(cs_tls1_2)
+
+    # record the certificate chain
+    record.certificate_chain = get_certificate_chain(url)
 
     # record certain response header fields
     fields = get_HTTP_header_fields(hostname,

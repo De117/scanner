@@ -1,0 +1,614 @@
+from enum import Enum
+import os
+import sys
+import time
+import socket
+import asn1crypto.x509
+
+class RecordType(Enum): # ContentType in RFC2246
+    """The type of the record (at the record protocol layer)"""
+    change_cipher_spec = b'\x14'    # 20
+    alert              = b'\x15'    # 21
+    handshake          = b'\x16'    # 22
+    application_data   = b'\x17'    # 23
+
+
+class SSLVersion(Enum):
+    SSLv2   = b'\x02\x00'
+    SSLv3   = b'\x03\x00'
+    TLSv1   = b'\x03\x01'
+    TLSv1_1 = b'\x03\x02'
+    TLSv1_2 = b'\x03\x03'
+    TLSv1_3 = b'\x03\x04'
+
+    def __lt__(a, b): return a.value < b.value
+    def __le__(a, b): return a.value <= b.value
+
+    @staticmethod
+    def as_bytes(versions_iterable):
+        return b"".join(v.value for v in versions_iterable)
+
+    @staticmethod
+    def from_bytes(versions_bytes):
+        if len(versions_bytes) % 2:
+            raise ValueError("Not an integral number of versions")
+        splat = [versions_bytes[i:i+2] for i in range(0,len(versions_bytes),2)]
+        return [[v for v in SSLVersion if v.value==b] for b in splat]
+
+
+class HandshakeType(Enum):
+    """The type of the handshake message (over the record protocol layer)"""
+    hello_request       = b'\x00'   #  0
+    client_hello        = b'\x01'   #  1
+    server_hello        = b'\x02'   #  2
+    certificate         = b'\x0B'   # 11
+    server_key_exchange = b'\x0C'   # 12
+    certificate_request = b'\x0D'   # 13
+    server_hello_done   = b'\x0E'   # 14
+    certificate_verify  = b'\x0F'   # 15
+    client_key_exchange = b'\x10'   # 16
+    finished            = b'\x14'   # 20
+    certificate_url     = b'\x15'   # 21 (RFC 4366)
+    certificate_status  = b'\x16'   # 22 (RFC 4366)
+
+
+class CipherSuite(Enum):
+    """List of all TLS ciphersuites,
+    taken from `https://www.iana.org/assignments/tls-parameters/`"""
+    TLS_NULL_WITH_NULL_NULL                       = b'\x00\x00' 
+    TLS_RSA_WITH_NULL_MD5                         = b'\x00\x01' 
+    TLS_RSA_WITH_NULL_SHA                         = b'\x00\x02' 
+    TLS_RSA_EXPORT_WITH_RC4_40_MD5                = b'\x00\x03' 
+    TLS_RSA_WITH_RC4_128_MD5                      = b'\x00\x04' 
+    TLS_RSA_WITH_RC4_128_SHA                      = b'\x00\x05' 
+    TLS_RSA_EXPORT_WITH_RC2_CBC_40_MD5            = b'\x00\x06' 
+    TLS_RSA_WITH_IDEA_CBC_SHA                     = b'\x00\x07' 
+    TLS_RSA_EXPORT_WITH_DES40_CBC_SHA             = b'\x00\x08' 
+    TLS_RSA_WITH_DES_CBC_SHA                      = b'\x00\x09' 
+    TLS_RSA_WITH_3DES_EDE_CBC_SHA                 = b'\x00\x0A' 
+    TLS_DH_DSS_EXPORT_WITH_DES40_CBC_SHA          = b'\x00\x0B' 
+    TLS_DH_DSS_WITH_DES_CBC_SHA                   = b'\x00\x0C' 
+    TLS_DH_DSS_WITH_3DES_EDE_CBC_SHA              = b'\x00\x0D' 
+    TLS_DH_RSA_EXPORT_WITH_DES40_CBC_SHA          = b'\x00\x0E' 
+    TLS_DH_RSA_WITH_DES_CBC_SHA                   = b'\x00\x0F' 
+    TLS_DH_RSA_WITH_3DES_EDE_CBC_SHA              = b'\x00\x10' 
+    TLS_DHE_DSS_EXPORT_WITH_DES40_CBC_SHA         = b'\x00\x11' 
+    TLS_DHE_DSS_WITH_DES_CBC_SHA                  = b'\x00\x12' 
+    TLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA             = b'\x00\x13' 
+    TLS_DHE_RSA_EXPORT_WITH_DES40_CBC_SHA         = b'\x00\x14' 
+    TLS_DHE_RSA_WITH_DES_CBC_SHA                  = b'\x00\x15' 
+    TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA             = b'\x00\x16' 
+    TLS_DH_anon_EXPORT_WITH_RC4_40_MD5            = b'\x00\x17' 
+    TLS_DH_anon_WITH_RC4_128_MD5                  = b'\x00\x18' 
+    TLS_DH_anon_EXPORT_WITH_DES40_CBC_SHA         = b'\x00\x19' 
+    TLS_DH_anon_WITH_DES_CBC_SHA                  = b'\x00\x1A' 
+    TLS_DH_anon_WITH_3DES_EDE_CBC_SHA             = b'\x00\x1B' 
+    TLS_KRB5_WITH_DES_CBC_SHA                     = b'\x00\x1E' 
+    TLS_KRB5_WITH_3DES_EDE_CBC_SHA                = b'\x00\x1F' 
+    TLS_KRB5_WITH_RC4_128_SHA                     = b'\x00\x20' 
+    TLS_KRB5_WITH_IDEA_CBC_SHA                    = b'\x00\x21' 
+    TLS_KRB5_WITH_DES_CBC_MD5                     = b'\x00\x22' 
+    TLS_KRB5_WITH_3DES_EDE_CBC_MD5                = b'\x00\x23' 
+    TLS_KRB5_WITH_RC4_128_MD5                     = b'\x00\x24' 
+    TLS_KRB5_WITH_IDEA_CBC_MD5                    = b'\x00\x25' 
+    TLS_KRB5_EXPORT_WITH_DES_CBC_40_SHA           = b'\x00\x26' 
+    TLS_KRB5_EXPORT_WITH_RC2_CBC_40_SHA           = b'\x00\x27' 
+    TLS_KRB5_EXPORT_WITH_RC4_40_SHA               = b'\x00\x28' 
+    TLS_KRB5_EXPORT_WITH_DES_CBC_40_MD5           = b'\x00\x29' 
+    TLS_KRB5_EXPORT_WITH_RC2_CBC_40_MD5           = b'\x00\x2A' 
+    TLS_KRB5_EXPORT_WITH_RC4_40_MD5               = b'\x00\x2B' 
+    TLS_PSK_WITH_NULL_SHA                         = b'\x00\x2C' 
+    TLS_DHE_PSK_WITH_NULL_SHA                     = b'\x00\x2D' 
+    TLS_RSA_PSK_WITH_NULL_SHA                     = b'\x00\x2E' 
+    TLS_RSA_WITH_AES_128_CBC_SHA                  = b'\x00\x2F' 
+    TLS_DH_DSS_WITH_AES_128_CBC_SHA               = b'\x00\x30' 
+    TLS_DH_RSA_WITH_AES_128_CBC_SHA               = b'\x00\x31' 
+    TLS_DHE_DSS_WITH_AES_128_CBC_SHA              = b'\x00\x32' 
+    TLS_DHE_RSA_WITH_AES_128_CBC_SHA              = b'\x00\x33' 
+    TLS_DH_anon_WITH_AES_128_CBC_SHA              = b'\x00\x34' 
+    TLS_RSA_WITH_AES_256_CBC_SHA                  = b'\x00\x35' 
+    TLS_DH_DSS_WITH_AES_256_CBC_SHA               = b'\x00\x36' 
+    TLS_DH_RSA_WITH_AES_256_CBC_SHA               = b'\x00\x37' 
+    TLS_DHE_DSS_WITH_AES_256_CBC_SHA              = b'\x00\x38' 
+    TLS_DHE_RSA_WITH_AES_256_CBC_SHA              = b'\x00\x39' 
+    TLS_DH_anon_WITH_AES_256_CBC_SHA              = b'\x00\x3A' 
+    TLS_RSA_WITH_NULL_SHA256                      = b'\x00\x3B' 
+    TLS_RSA_WITH_AES_128_CBC_SHA256               = b'\x00\x3C' 
+    TLS_RSA_WITH_AES_256_CBC_SHA256               = b'\x00\x3D' 
+    TLS_DH_DSS_WITH_AES_128_CBC_SHA256            = b'\x00\x3E' 
+    TLS_DH_RSA_WITH_AES_128_CBC_SHA256            = b'\x00\x3F' 
+    TLS_DHE_DSS_WITH_AES_128_CBC_SHA256           = b'\x00\x40' 
+    TLS_RSA_WITH_CAMELLIA_128_CBC_SHA             = b'\x00\x41' 
+    TLS_DH_DSS_WITH_CAMELLIA_128_CBC_SHA          = b'\x00\x42' 
+    TLS_DH_RSA_WITH_CAMELLIA_128_CBC_SHA          = b'\x00\x43' 
+    TLS_DHE_DSS_WITH_CAMELLIA_128_CBC_SHA         = b'\x00\x44' 
+    TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA         = b'\x00\x45' 
+    TLS_DH_anon_WITH_CAMELLIA_128_CBC_SHA         = b'\x00\x46' 
+    TLS_DH_DSS_WITH_AES_256_CBC_SHA256            = b'\x00\x68' 
+    TLS_DH_RSA_WITH_AES_256_CBC_SHA256            = b'\x00\x69' 
+    TLS_DHE_DSS_WITH_AES_256_CBC_SHA256           = b'\x00\x6A' 
+    TLS_DHE_RSA_WITH_AES_256_CBC_SHA256           = b'\x00\x6B' 
+    TLS_DH_anon_WITH_AES_128_CBC_SHA256           = b'\x00\x6C' 
+    TLS_DH_anon_WITH_AES_256_CBC_SHA256           = b'\x00\x6D' 
+    TLS_RSA_WITH_CAMELLIA_256_CBC_SHA             = b'\x00\x84' 
+    TLS_DH_DSS_WITH_CAMELLIA_256_CBC_SHA          = b'\x00\x85' 
+    TLS_DH_RSA_WITH_CAMELLIA_256_CBC_SHA          = b'\x00\x86' 
+    TLS_DHE_DSS_WITH_CAMELLIA_256_CBC_SHA         = b'\x00\x87' 
+    TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA         = b'\x00\x88' 
+    TLS_DH_anon_WITH_CAMELLIA_256_CBC_SHA         = b'\x00\x89' 
+    TLS_PSK_WITH_RC4_128_SHA                      = b'\x00\x8A' 
+    TLS_PSK_WITH_3DES_EDE_CBC_SHA                 = b'\x00\x8B' 
+    TLS_PSK_WITH_AES_128_CBC_SHA                  = b'\x00\x8C' 
+    TLS_PSK_WITH_AES_256_CBC_SHA                  = b'\x00\x8D' 
+    TLS_DHE_PSK_WITH_RC4_128_SHA                  = b'\x00\x8E' 
+    TLS_DHE_PSK_WITH_3DES_EDE_CBC_SHA             = b'\x00\x8F' 
+    TLS_DHE_PSK_WITH_AES_128_CBC_SHA              = b'\x00\x90' 
+    TLS_DHE_PSK_WITH_AES_256_CBC_SHA              = b'\x00\x91' 
+    TLS_RSA_PSK_WITH_RC4_128_SHA                  = b'\x00\x92' 
+    TLS_RSA_PSK_WITH_3DES_EDE_CBC_SHA             = b'\x00\x93' 
+    TLS_RSA_PSK_WITH_AES_128_CBC_SHA              = b'\x00\x94' 
+    TLS_RSA_PSK_WITH_AES_256_CBC_SHA              = b'\x00\x95' 
+    TLS_RSA_WITH_SEED_CBC_SHA                     = b'\x00\x96' 
+    TLS_DH_DSS_WITH_SEED_CBC_SHA                  = b'\x00\x97' 
+    TLS_DH_RSA_WITH_SEED_CBC_SHA                  = b'\x00\x98' 
+    TLS_DHE_DSS_WITH_SEED_CBC_SHA                 = b'\x00\x99' 
+    TLS_DHE_RSA_WITH_SEED_CBC_SHA                 = b'\x00\x9A' 
+    TLS_DH_anon_WITH_SEED_CBC_SHA                 = b'\x00\x9B' 
+    TLS_RSA_WITH_AES_128_GCM_SHA256               = b'\x00\x9C' 
+    TLS_RSA_WITH_AES_256_GCM_SHA384               = b'\x00\x9D' 
+    TLS_DHE_RSA_WITH_AES_128_GCM_SHA256           = b'\x00\x9E' 
+    TLS_DHE_RSA_WITH_AES_256_GCM_SHA384           = b'\x00\x9F' 
+    TLS_DH_RSA_WITH_AES_128_GCM_SHA256            = b'\x00\xA0' 
+    TLS_DH_RSA_WITH_AES_256_GCM_SHA384            = b'\x00\xA1' 
+    TLS_DHE_DSS_WITH_AES_128_GCM_SHA256           = b'\x00\xA2' 
+    TLS_DHE_DSS_WITH_AES_256_GCM_SHA384           = b'\x00\xA3' 
+    TLS_DH_DSS_WITH_AES_128_GCM_SHA256            = b'\x00\xA4' 
+    TLS_DH_DSS_WITH_AES_256_GCM_SHA384            = b'\x00\xA5' 
+    TLS_DH_anon_WITH_AES_128_GCM_SHA256           = b'\x00\xA6' 
+    TLS_DH_anon_WITH_AES_256_GCM_SHA384           = b'\x00\xA7' 
+    TLS_PSK_WITH_AES_128_GCM_SHA256               = b'\x00\xA8' 
+    TLS_PSK_WITH_AES_256_GCM_SHA384               = b'\x00\xA9' 
+    TLS_DHE_PSK_WITH_AES_128_GCM_SHA256           = b'\x00\xAA' 
+    TLS_DHE_PSK_WITH_AES_256_GCM_SHA384           = b'\x00\xAB' 
+    TLS_RSA_PSK_WITH_AES_128_GCM_SHA256           = b'\x00\xAC' 
+    TLS_RSA_PSK_WITH_AES_256_GCM_SHA384           = b'\x00\xAD' 
+    TLS_PSK_WITH_AES_128_CBC_SHA256               = b'\x00\xAE' 
+    TLS_PSK_WITH_AES_256_CBC_SHA384               = b'\x00\xAF' 
+    TLS_PSK_WITH_NULL_SHA256                      = b'\x00\xB0' 
+    TLS_PSK_WITH_NULL_SHA384                      = b'\x00\xB1' 
+    TLS_DHE_PSK_WITH_AES_128_CBC_SHA256           = b'\x00\xB2' 
+    TLS_DHE_PSK_WITH_AES_256_CBC_SHA384           = b'\x00\xB3' 
+    TLS_DHE_PSK_WITH_NULL_SHA256                  = b'\x00\xB4' 
+    TLS_DHE_PSK_WITH_NULL_SHA384                  = b'\x00\xB5' 
+    TLS_RSA_PSK_WITH_AES_128_CBC_SHA256           = b'\x00\xB6' 
+    TLS_RSA_PSK_WITH_AES_256_CBC_SHA384           = b'\x00\xB7' 
+    TLS_RSA_PSK_WITH_NULL_SHA256                  = b'\x00\xB8' 
+    TLS_RSA_PSK_WITH_NULL_SHA384                  = b'\x00\xB9' 
+    TLS_RSA_WITH_CAMELLIA_128_CBC_SHA256          = b'\x00\xBA' 
+    TLS_DH_DSS_WITH_CAMELLIA_128_CBC_SHA256       = b'\x00\xBB' 
+    TLS_DH_RSA_WITH_CAMELLIA_128_CBC_SHA256       = b'\x00\xBC' 
+    TLS_DHE_DSS_WITH_CAMELLIA_128_CBC_SHA256      = b'\x00\xBD' 
+    TLS_DHE_RSA_WITH_CAMELLIA_128_CBC_SHA256      = b'\x00\xBE' 
+    TLS_DH_anon_WITH_CAMELLIA_128_CBC_SHA256      = b'\x00\xBF' 
+    TLS_RSA_WITH_CAMELLIA_256_CBC_SHA256          = b'\x00\xC0' 
+    TLS_DH_DSS_WITH_CAMELLIA_256_CBC_SHA256       = b'\x00\xC1' 
+    TLS_DH_RSA_WITH_CAMELLIA_256_CBC_SHA256       = b'\x00\xC2' 
+    TLS_DHE_DSS_WITH_CAMELLIA_256_CBC_SHA256      = b'\x00\xC3' 
+    TLS_DHE_RSA_WITH_CAMELLIA_256_CBC_SHA256      = b'\x00\xC4' 
+    TLS_DH_anon_WITH_CAMELLIA_256_CBC_SHA256      = b'\x00\xC5' 
+    # TLS_EMPTY_RENEGOTIATION_INFO_SCSV             = b'\x00\xFF' 
+    # TLS_FALLBACK_SCSV                             = b'\x56\x00' 
+    TLS_ECDH_ECDSA_WITH_NULL_SHA                  = b'\xC0\x01' 
+    TLS_ECDH_ECDSA_WITH_RC4_128_SHA               = b'\xC0\x02' 
+    TLS_ECDH_ECDSA_WITH_3DES_EDE_CBC_SHA          = b'\xC0\x03' 
+    TLS_ECDH_ECDSA_WITH_AES_128_CBC_SHA           = b'\xC0\x04' 
+    TLS_ECDH_ECDSA_WITH_AES_256_CBC_SHA           = b'\xC0\x05' 
+    TLS_ECDHE_ECDSA_WITH_NULL_SHA                 = b'\xC0\x06' 
+    TLS_ECDHE_ECDSA_WITH_RC4_128_SHA              = b'\xC0\x07' 
+    TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA         = b'\xC0\x08' 
+    TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA          = b'\xC0\x09' 
+    TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA          = b'\xC0\x0A' 
+    TLS_ECDH_RSA_WITH_NULL_SHA                    = b'\xC0\x0B' 
+    TLS_ECDH_RSA_WITH_RC4_128_SHA                 = b'\xC0\x0C' 
+    TLS_ECDH_RSA_WITH_3DES_EDE_CBC_SHA            = b'\xC0\x0D' 
+    TLS_ECDH_RSA_WITH_AES_128_CBC_SHA             = b'\xC0\x0E' 
+    TLS_ECDH_RSA_WITH_AES_256_CBC_SHA             = b'\xC0\x0F' 
+    TLS_ECDHE_RSA_WITH_NULL_SHA                   = b'\xC0\x10' 
+    TLS_ECDHE_RSA_WITH_RC4_128_SHA                = b'\xC0\x11' 
+    TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA           = b'\xC0\x12' 
+    TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA            = b'\xC0\x13' 
+    TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA            = b'\xC0\x14' 
+    TLS_ECDH_anon_WITH_NULL_SHA                   = b'\xC0\x15' 
+    TLS_ECDH_anon_WITH_RC4_128_SHA                = b'\xC0\x16' 
+    TLS_ECDH_anon_WITH_3DES_EDE_CBC_SHA           = b'\xC0\x17' 
+    TLS_ECDH_anon_WITH_AES_128_CBC_SHA            = b'\xC0\x18' 
+    TLS_ECDH_anon_WITH_AES_256_CBC_SHA            = b'\xC0\x19' 
+    TLS_SRP_SHA_WITH_3DES_EDE_CBC_SHA             = b'\xC0\x1A' 
+    TLS_SRP_SHA_RSA_WITH_3DES_EDE_CBC_SHA         = b'\xC0\x1B' 
+    TLS_SRP_SHA_DSS_WITH_3DES_EDE_CBC_SHA         = b'\xC0\x1C' 
+    TLS_SRP_SHA_WITH_AES_128_CBC_SHA              = b'\xC0\x1D' 
+    TLS_SRP_SHA_RSA_WITH_AES_128_CBC_SHA          = b'\xC0\x1E' 
+    TLS_SRP_SHA_DSS_WITH_AES_128_CBC_SHA          = b'\xC0\x1F' 
+    TLS_SRP_SHA_WITH_AES_256_CBC_SHA              = b'\xC0\x20' 
+    TLS_SRP_SHA_RSA_WITH_AES_256_CBC_SHA          = b'\xC0\x21' 
+    TLS_SRP_SHA_DSS_WITH_AES_256_CBC_SHA          = b'\xC0\x22' 
+    TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256       = b'\xC0\x23' 
+    TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384       = b'\xC0\x24' 
+    TLS_ECDH_ECDSA_WITH_AES_128_CBC_SHA256        = b'\xC0\x25' 
+    TLS_ECDH_ECDSA_WITH_AES_256_CBC_SHA384        = b'\xC0\x26' 
+    TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256         = b'\xC0\x27' 
+    TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384         = b'\xC0\x28' 
+    TLS_ECDH_RSA_WITH_AES_128_CBC_SHA256          = b'\xC0\x29' 
+    TLS_ECDH_RSA_WITH_AES_256_CBC_SHA384          = b'\xC0\x2A' 
+    TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256       = b'\xC0\x2B' 
+    TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384       = b'\xC0\x2C' 
+    TLS_ECDH_ECDSA_WITH_AES_128_GCM_SHA256        = b'\xC0\x2D' 
+    TLS_ECDH_ECDSA_WITH_AES_256_GCM_SHA384        = b'\xC0\x2E' 
+    TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256         = b'\xC0\x2F' 
+    TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384         = b'\xC0\x30' 
+    TLS_ECDH_RSA_WITH_AES_128_GCM_SHA256          = b'\xC0\x31' 
+    TLS_ECDH_RSA_WITH_AES_256_GCM_SHA384          = b'\xC0\x32' 
+    TLS_ECDHE_PSK_WITH_RC4_128_SHA                = b'\xC0\x33' 
+    TLS_ECDHE_PSK_WITH_3DES_EDE_CBC_SHA           = b'\xC0\x34' 
+    TLS_ECDHE_PSK_WITH_AES_128_CBC_SHA            = b'\xC0\x35' 
+    TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA            = b'\xC0\x36' 
+    TLS_ECDHE_PSK_WITH_AES_128_CBC_SHA256         = b'\xC0\x37' 
+    TLS_ECDHE_PSK_WITH_AES_256_CBC_SHA384         = b'\xC0\x38' 
+    TLS_ECDHE_PSK_WITH_NULL_SHA                   = b'\xC0\x39' 
+    TLS_ECDHE_PSK_WITH_NULL_SHA256                = b'\xC0\x3A' 
+    TLS_ECDHE_PSK_WITH_NULL_SHA384                = b'\xC0\x3B' 
+    TLS_RSA_WITH_ARIA_128_CBC_SHA256              = b'\xC0\x3C' 
+    TLS_RSA_WITH_ARIA_256_CBC_SHA384              = b'\xC0\x3D' 
+    TLS_DH_DSS_WITH_ARIA_128_CBC_SHA256           = b'\xC0\x3E' 
+    TLS_DH_DSS_WITH_ARIA_256_CBC_SHA384           = b'\xC0\x3F' 
+    TLS_DH_RSA_WITH_ARIA_128_CBC_SHA256           = b'\xC0\x40' 
+    TLS_DH_RSA_WITH_ARIA_256_CBC_SHA384           = b'\xC0\x41' 
+    TLS_DHE_DSS_WITH_ARIA_128_CBC_SHA256          = b'\xC0\x42' 
+    TLS_DHE_DSS_WITH_ARIA_256_CBC_SHA384          = b'\xC0\x43' 
+    TLS_DHE_RSA_WITH_ARIA_128_CBC_SHA256          = b'\xC0\x44' 
+    TLS_DHE_RSA_WITH_ARIA_256_CBC_SHA384          = b'\xC0\x45' 
+    TLS_DH_anon_WITH_ARIA_128_CBC_SHA256          = b'\xC0\x46' 
+    TLS_DH_anon_WITH_ARIA_256_CBC_SHA384          = b'\xC0\x47' 
+    TLS_ECDHE_ECDSA_WITH_ARIA_128_CBC_SHA256      = b'\xC0\x48' 
+    TLS_ECDHE_ECDSA_WITH_ARIA_256_CBC_SHA384      = b'\xC0\x49' 
+    TLS_ECDH_ECDSA_WITH_ARIA_128_CBC_SHA256       = b'\xC0\x4A' 
+    TLS_ECDH_ECDSA_WITH_ARIA_256_CBC_SHA384       = b'\xC0\x4B' 
+    TLS_ECDHE_RSA_WITH_ARIA_128_CBC_SHA256        = b'\xC0\x4C' 
+    TLS_ECDHE_RSA_WITH_ARIA_256_CBC_SHA384        = b'\xC0\x4D' 
+    TLS_ECDH_RSA_WITH_ARIA_128_CBC_SHA256         = b'\xC0\x4E' 
+    TLS_ECDH_RSA_WITH_ARIA_256_CBC_SHA384         = b'\xC0\x4F' 
+    TLS_RSA_WITH_ARIA_128_GCM_SHA256              = b'\xC0\x50' 
+    TLS_RSA_WITH_ARIA_256_GCM_SHA384              = b'\xC0\x51' 
+    TLS_DHE_RSA_WITH_ARIA_128_GCM_SHA256          = b'\xC0\x52' 
+    TLS_DHE_RSA_WITH_ARIA_256_GCM_SHA384          = b'\xC0\x53' 
+    TLS_DH_RSA_WITH_ARIA_128_GCM_SHA256           = b'\xC0\x54' 
+    TLS_DH_RSA_WITH_ARIA_256_GCM_SHA384           = b'\xC0\x55' 
+    TLS_DHE_DSS_WITH_ARIA_128_GCM_SHA256          = b'\xC0\x56' 
+    TLS_DHE_DSS_WITH_ARIA_256_GCM_SHA384          = b'\xC0\x57' 
+    TLS_DH_DSS_WITH_ARIA_128_GCM_SHA256           = b'\xC0\x58' 
+    TLS_DH_DSS_WITH_ARIA_256_GCM_SHA384           = b'\xC0\x59' 
+    TLS_DH_anon_WITH_ARIA_128_GCM_SHA256          = b'\xC0\x5A' 
+    TLS_DH_anon_WITH_ARIA_256_GCM_SHA384          = b'\xC0\x5B' 
+    TLS_ECDHE_ECDSA_WITH_ARIA_128_GCM_SHA256      = b'\xC0\x5C' 
+    TLS_ECDHE_ECDSA_WITH_ARIA_256_GCM_SHA384      = b'\xC0\x5D' 
+    TLS_ECDH_ECDSA_WITH_ARIA_128_GCM_SHA256       = b'\xC0\x5E' 
+    TLS_ECDH_ECDSA_WITH_ARIA_256_GCM_SHA384       = b'\xC0\x5F' 
+    TLS_ECDHE_RSA_WITH_ARIA_128_GCM_SHA256        = b'\xC0\x60' 
+    TLS_ECDHE_RSA_WITH_ARIA_256_GCM_SHA384        = b'\xC0\x61' 
+    TLS_ECDH_RSA_WITH_ARIA_128_GCM_SHA256         = b'\xC0\x62' 
+    TLS_ECDH_RSA_WITH_ARIA_256_GCM_SHA384         = b'\xC0\x63' 
+    TLS_PSK_WITH_ARIA_128_CBC_SHA256              = b'\xC0\x64' 
+    TLS_PSK_WITH_ARIA_256_CBC_SHA384              = b'\xC0\x65' 
+    TLS_DHE_PSK_WITH_ARIA_128_CBC_SHA256          = b'\xC0\x66' 
+    TLS_DHE_PSK_WITH_ARIA_256_CBC_SHA384          = b'\xC0\x67' 
+    TLS_RSA_PSK_WITH_ARIA_128_CBC_SHA256          = b'\xC0\x68' 
+    TLS_RSA_PSK_WITH_ARIA_256_CBC_SHA384          = b'\xC0\x69' 
+    TLS_PSK_WITH_ARIA_128_GCM_SHA256              = b'\xC0\x6A' 
+    TLS_PSK_WITH_ARIA_256_GCM_SHA384              = b'\xC0\x6B' 
+    TLS_DHE_PSK_WITH_ARIA_128_GCM_SHA256          = b'\xC0\x6C' 
+    TLS_DHE_PSK_WITH_ARIA_256_GCM_SHA384          = b'\xC0\x6D' 
+    TLS_RSA_PSK_WITH_ARIA_128_GCM_SHA256          = b'\xC0\x6E' 
+    TLS_RSA_PSK_WITH_ARIA_256_GCM_SHA384          = b'\xC0\x6F' 
+    TLS_ECDHE_PSK_WITH_ARIA_128_CBC_SHA256        = b'\xC0\x70' 
+    TLS_ECDHE_PSK_WITH_ARIA_256_CBC_SHA384        = b'\xC0\x71' 
+    TLS_ECDHE_ECDSA_WITH_CAMELLIA_128_CBC_SHA256  = b'\xC0\x72' 
+    TLS_ECDHE_ECDSA_WITH_CAMELLIA_256_CBC_SHA384  = b'\xC0\x73' 
+    TLS_ECDH_ECDSA_WITH_CAMELLIA_128_CBC_SHA256   = b'\xC0\x74' 
+    TLS_ECDH_ECDSA_WITH_CAMELLIA_256_CBC_SHA384   = b'\xC0\x75' 
+    TLS_ECDHE_RSA_WITH_CAMELLIA_128_CBC_SHA256    = b'\xC0\x76' 
+    TLS_ECDHE_RSA_WITH_CAMELLIA_256_CBC_SHA384    = b'\xC0\x77' 
+    TLS_ECDH_RSA_WITH_CAMELLIA_128_CBC_SHA256     = b'\xC0\x78' 
+    TLS_ECDH_RSA_WITH_CAMELLIA_256_CBC_SHA384     = b'\xC0\x79' 
+    TLS_RSA_WITH_CAMELLIA_128_GCM_SHA256          = b'\xC0\x7A' 
+    TLS_RSA_WITH_CAMELLIA_256_GCM_SHA384          = b'\xC0\x7B' 
+    TLS_DHE_RSA_WITH_CAMELLIA_128_GCM_SHA256      = b'\xC0\x7C' 
+    TLS_DHE_RSA_WITH_CAMELLIA_256_GCM_SHA384      = b'\xC0\x7D' 
+    TLS_DH_RSA_WITH_CAMELLIA_128_GCM_SHA256       = b'\xC0\x7E' 
+    TLS_DH_RSA_WITH_CAMELLIA_256_GCM_SHA384       = b'\xC0\x7F' 
+    TLS_DHE_DSS_WITH_CAMELLIA_128_GCM_SHA256      = b'\xC0\x80' 
+    TLS_DHE_DSS_WITH_CAMELLIA_256_GCM_SHA384      = b'\xC0\x81' 
+    TLS_DH_DSS_WITH_CAMELLIA_128_GCM_SHA256       = b'\xC0\x82' 
+    TLS_DH_DSS_WITH_CAMELLIA_256_GCM_SHA384       = b'\xC0\x83' 
+    TLS_DH_anon_WITH_CAMELLIA_128_GCM_SHA256      = b'\xC0\x84' 
+    TLS_DH_anon_WITH_CAMELLIA_256_GCM_SHA384      = b'\xC0\x85' 
+    TLS_ECDHE_ECDSA_WITH_CAMELLIA_128_GCM_SHA256  = b'\xC0\x86' 
+    TLS_ECDHE_ECDSA_WITH_CAMELLIA_256_GCM_SHA384  = b'\xC0\x87' 
+    TLS_ECDH_ECDSA_WITH_CAMELLIA_128_GCM_SHA256   = b'\xC0\x88' 
+    TLS_ECDH_ECDSA_WITH_CAMELLIA_256_GCM_SHA384   = b'\xC0\x89' 
+    TLS_ECDHE_RSA_WITH_CAMELLIA_128_GCM_SHA256    = b'\xC0\x8A' 
+    TLS_ECDHE_RSA_WITH_CAMELLIA_256_GCM_SHA384    = b'\xC0\x8B' 
+    TLS_ECDH_RSA_WITH_CAMELLIA_128_GCM_SHA256     = b'\xC0\x8C' 
+    TLS_ECDH_RSA_WITH_CAMELLIA_256_GCM_SHA384     = b'\xC0\x8D' 
+    TLS_PSK_WITH_CAMELLIA_128_GCM_SHA256          = b'\xC0\x8E' 
+    TLS_PSK_WITH_CAMELLIA_256_GCM_SHA384          = b'\xC0\x8F' 
+    TLS_DHE_PSK_WITH_CAMELLIA_128_GCM_SHA256      = b'\xC0\x90' 
+    TLS_DHE_PSK_WITH_CAMELLIA_256_GCM_SHA384      = b'\xC0\x91' 
+    TLS_RSA_PSK_WITH_CAMELLIA_128_GCM_SHA256      = b'\xC0\x92' 
+    TLS_RSA_PSK_WITH_CAMELLIA_256_GCM_SHA384      = b'\xC0\x93' 
+    TLS_PSK_WITH_CAMELLIA_128_CBC_SHA256          = b'\xC0\x94' 
+    TLS_PSK_WITH_CAMELLIA_256_CBC_SHA384          = b'\xC0\x95' 
+    TLS_DHE_PSK_WITH_CAMELLIA_128_CBC_SHA256      = b'\xC0\x96' 
+    TLS_DHE_PSK_WITH_CAMELLIA_256_CBC_SHA384      = b'\xC0\x97' 
+    TLS_RSA_PSK_WITH_CAMELLIA_128_CBC_SHA256      = b'\xC0\x98' 
+    TLS_RSA_PSK_WITH_CAMELLIA_256_CBC_SHA384      = b'\xC0\x99' 
+    TLS_ECDHE_PSK_WITH_CAMELLIA_128_CBC_SHA256    = b'\xC0\x9A' 
+    TLS_ECDHE_PSK_WITH_CAMELLIA_256_CBC_SHA384    = b'\xC0\x9B' 
+    TLS_RSA_WITH_AES_128_CCM                      = b'\xC0\x9C' 
+    TLS_RSA_WITH_AES_256_CCM                      = b'\xC0\x9D' 
+    TLS_DHE_RSA_WITH_AES_128_CCM                  = b'\xC0\x9E' 
+    TLS_DHE_RSA_WITH_AES_256_CCM                  = b'\xC0\x9F' 
+    TLS_RSA_WITH_AES_128_CCM_8                    = b'\xC0\xA0' 
+    TLS_RSA_WITH_AES_256_CCM_8                    = b'\xC0\xA1' 
+    TLS_DHE_RSA_WITH_AES_128_CCM_8                = b'\xC0\xA2' 
+    TLS_DHE_RSA_WITH_AES_256_CCM_8                = b'\xC0\xA3' 
+    TLS_PSK_WITH_AES_128_CCM                      = b'\xC0\xA4' 
+    TLS_PSK_WITH_AES_256_CCM                      = b'\xC0\xA5' 
+    TLS_DHE_PSK_WITH_AES_128_CCM                  = b'\xC0\xA6' 
+    TLS_DHE_PSK_WITH_AES_256_CCM                  = b'\xC0\xA7' 
+    TLS_PSK_WITH_AES_128_CCM_8                    = b'\xC0\xA8' 
+    TLS_PSK_WITH_AES_256_CCM_8                    = b'\xC0\xA9' 
+    TLS_PSK_DHE_WITH_AES_128_CCM_8                = b'\xC0\xAA' 
+    TLS_PSK_DHE_WITH_AES_256_CCM_8                = b'\xC0\xAB' 
+    TLS_ECDHE_ECDSA_WITH_AES_128_CCM              = b'\xC0\xAC' 
+    TLS_ECDHE_ECDSA_WITH_AES_256_CCM              = b'\xC0\xAD' 
+    TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8            = b'\xC0\xAE' 
+    TLS_ECDHE_ECDSA_WITH_AES_256_CCM_8            = b'\xC0\xAF' 
+    TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256   = b'\xCC\xA8' 
+    TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 = b'\xCC\xA9' 
+    TLS_DHE_RSA_WITH_CHACHA20_POLY1305_SHA256     = b'\xCC\xAA' 
+    TLS_PSK_WITH_CHACHA20_POLY1305_SHA256         = b'\xCC\xAB' 
+    TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256   = b'\xCC\xAC' 
+    TLS_DHE_PSK_WITH_CHACHA20_POLY1305_SHA256     = b'\xCC\xAD' 
+    TLS_RSA_PSK_WITH_CHACHA20_POLY1305_SHA256     = b'\xCC\xAE' 
+
+    def __lt__(a, b): return a.value < b.value
+    def __le__(a, b): return a.value <= b.value
+
+    @staticmethod
+    def find(cs : bytes):
+        for _cs in CipherSuite:
+            if cs == _cs.value:
+                return cs
+
+    @staticmethod
+    def as_bytes(csuites_iterable):
+        return b"".join(cs.value for cs in csuites_iterable)
+
+    @staticmethod
+    def from_bytes(csuites : bytes):
+        if len(csuites_bytes) % 2:
+            raise ValueError("Not an integral number of ciphersuites")
+        splat = [csuites[i:i+2] for i in range(0,len(csuites),2)]
+        return [CipherSuite.find(b) for b in splat]
+
+
+# Divide ciphersuites into disjoint sets, depending on how frequent they are.
+# We can then check the rarely used ones as a block, and fall back to checking
+#  individual ciphersuites in case some of them are actually supported.
+
+weak_csuites = [cs for cs in CipherSuite if ("anon" in cs.name or
+                                             "NULL" in cs.name or
+                                             "EXPORT" in cs.name)]
+
+rare_csuites = [cs for cs in CipherSuite if ("_DH_" in cs.name or
+                                             "_PSK_" in cs.name or
+                                             "_SRP_" in cs.name or
+                                             "_KRB5_" in cs.name or
+                                             "_ARIA_" in cs.name) and
+                                             cs not in weak_csuites]
+
+frequent_csuites = [cs for cs in CipherSuite if (cs not in weak_csuites and
+                                                 cs not in rare_csuites)]
+
+
+
+def create_handshake_record(ssl_version, csuite_list, sni_url=None, max_version=None):
+    """Creates a handshake record with the specified TLS version
+    and cipher suites."""
+
+    csuites = b''.join( csuite.value for csuite in csuite_list )
+    csuites_len = len(csuites).to_bytes(2, "big")
+
+    # First we build the handshake itself
+    handshake = \
+               ( (ssl_version.value          # max client-supported version
+                    if not max_version
+                    else   max_version.value)
+                + os.urandom(32)  # (strictly speaking, first 4B should be GMT)
+                + b'\x00'         # session_id length is 0 (i.e. no session ID)
+                + csuites_len
+                + csuites
+                + b'\x01'         # compression methods field length
+                + b'\x00' )       # compression methods (only null compression)
+
+    if sni_url:
+        # SNI extension content
+        sni_ext = ( b'\x00'                         # server name type (host name)
+                  + len(sni_url).to_bytes(2, "big") # server name length
+                  + bytes(sni_url, "utf8"))         # server name
+
+        sni_ext = len(sni_ext).to_bytes(2, "big") + sni_ext
+
+        # the wrapper
+        extension = (b'\x00\x00'                     # extension type (server name)
+                   + len(sni_ext).to_bytes(2, "big") # extension length
+                   + sni_ext)                        # extension itself
+
+        handshake += len(extension).to_bytes(2, "big") + extension
+
+
+
+    handshake = (HandshakeType.client_hello.value
+                + len(handshake).to_bytes(3, "big")
+                + handshake)
+
+    # Then we build the record containing it
+    handshake_record = (
+                RecordType.handshake.value
+                + ssl_version.value                 # min client-supported version
+                + len(handshake).to_bytes(2, "big")
+                + handshake )
+
+    return handshake_record
+
+
+
+def try_cipher(ssl_version, cipher, url="www.example.com"):
+    """Check whether a cipher is supported on the given website,
+    using the specified SSL/TLS version for the handshake.
+    
+    If `cipher` is falsy, this function checks whether the SSL/TLS version
+    is supported at all.
+    If `cipher` is a list, it checks whether at least one is supported.
+    """
+
+    try:
+        sock = socket.socket()
+        sock.connect((url, 443))
+    except OSError:
+        try:
+            sock.settimeout(10)
+            sock.connect((url, 443))
+        except:
+            return False
+
+    if not cipher:             _ = [cs for cs in CipherSuite]
+    elif type(cipher) != list: _ = [cipher]
+    else:                      _ = cipher
+
+    handshake = create_handshake_record(ssl_version, _, url)
+
+    try:
+        sock.send(handshake)
+        resp = sock.recv(100000)
+    except OSError:
+        return False
+
+    try:
+        # check record-protocol header
+        assert resp[0:1] == RecordType.handshake.value
+        assert resp[1:3] == ssl_version.value
+
+        record_length = int.from_bytes(resp[3:5], "big")
+        assert record_length <= len(resp) - 5   # the 5-byte header is not
+                                                #  included in the length
+
+        # check handshake-protocol header
+        handshake = resp[5:]
+        assert handshake[0:1] == HandshakeType.server_hello.value
+
+        hshake_length = int.from_bytes(handshake[1:4], "big")
+        assert hshake_length <= record_length - 4
+                            # assume no fragmentation!
+                            # also, handshake type and length are *not*
+                            # included in header length, but TLS version *is*
+
+        assert handshake[4:6] == ssl_version.value
+
+        # this should be enough for now
+        return True
+
+    except AssertionError as e:
+        return False
+    finally:
+        sock.close()
+
+def try_protocol(ssl_version, url):
+    """Check whether the given SSL/TLS version is supported."""
+    if ssl_version == SSLVersion.SSLv2:
+        return False    # TODO
+    return try_cipher(ssl_version, None, url)
+
+
+def extract_next_record(resp):
+    """Parse the received response and extract the first record-layer record
+    from it.
+
+    Returns a (record, remainder) tuple, where `record` is the extracted
+    record, and `remainder` is the rest of the response.
+    """
+
+    # for now, only handshakes
+    if not resp[0:1] == RecordType.handshake.value:
+        return (b"", b"")
+
+    record_len = int.from_bytes(resp[3:5], "big")
+
+    record = resp[5:record_len+5]
+    remainder = resp[record_len+5:]
+
+    return record, remainder
+
+
+def extract_certificate_chain(certshake):
+    """Extracts the certificate chain from the given record-layer Certificate
+    record; returns a list of binary DER certificates"""
+
+    assert certshake[0:1] == HandshakeType.certificate.value
+    length       = int.from_bytes(certshake[1:4], "big")    # we ignore this one
+    certs_length = int.from_bytes(certshake[4:7], "big")
+
+    certs = certshake[7:]
+    assert len(certs) == certs_length
+
+    cert_list = []
+    
+    while certs:
+        cert_len = int.from_bytes(certs[:3], "big")
+        cert = certs[3:cert_len+3]
+        assert len(cert) == cert_len
+
+        cert_list.append(cert)
+        certs = certs[cert_len+3:]
+
+    return cert_list
+    # return [asn1crypto.x509.Certificate.load(c) for c in cert_list)
+
+
+def scan_all_ciphers(ssl_version, url="www.example.com", delay=0.0):
+    supported_csuites = []
+    to_scan = []
+
+    # check weak csuites
+    print(url+" -- checking weak csuites", file=sys.stderr)
+    if try_cipher(ssl_version, weak_csuites, url):
+        to_scan += weak_csuites
+    # check rare csuites
+    print(url+" -- checking rare csuites", file=sys.stderr)
+    if try_cipher(ssl_version, rare_csuites, url):
+        to_scan += rare_csuites
+    # check frequent csuites
+    print(url+" -- checking freq csuites", file=sys.stderr)
+    if try_cipher(ssl_version, frequent_csuites, url):
+        to_scan += frequent_csuites
+
+    print("starting scan of {} csuites...".format(len(to_scan)), file=sys.stderr)
+
+    for csuite in to_scan:
+        print(url+" -- scanning "+csuite.name, file=sys.stderr)
+        ok = try_cipher(ssl_version, csuite, url)
+        if ok:
+            supported_csuites += [csuite]
+        time.sleep(delay)
+
+    return supported_csuites
