@@ -11,6 +11,7 @@ class RecordType(Enum): # ContentType in RFC2246
     alert              = b'\x15'    # 21
     handshake          = b'\x16'    # 22
     application_data   = b'\x17'    # 23
+    heartbeat          = b'\x18'    # 24
 
 
 class SSLVersion(Enum):
@@ -38,18 +39,150 @@ class SSLVersion(Enum):
 
 class HandshakeType(Enum):
     """The type of the handshake message (over the record protocol layer)"""
-    hello_request       = b'\x00'   #  0
-    client_hello        = b'\x01'   #  1
-    server_hello        = b'\x02'   #  2
-    certificate         = b'\x0B'   # 11
-    server_key_exchange = b'\x0C'   # 12
-    certificate_request = b'\x0D'   # 13
-    server_hello_done   = b'\x0E'   # 14
-    certificate_verify  = b'\x0F'   # 15
-    client_key_exchange = b'\x10'   # 16
-    finished            = b'\x14'   # 20
-    certificate_url     = b'\x15'   # 21 (RFC 4366)
-    certificate_status  = b'\x16'   # 22 (RFC 4366)
+    hello_request        = b'\x00'
+    client_hello         = b'\x01'
+    server_hello         = b'\x02'
+    hello_verify_request = b'\x03'
+    NewSessionTicket     = b'\x04'
+                                     # 5-10 unassigned
+    certificate          = b'\x0B'
+    server_key_exchange  = b'\x0C'
+    certificate_request  = b'\x0D'
+    server_hello_done    = b'\x0E'
+    certificate_verify   = b'\x0F'
+    client_key_exchange  = b'\x10'
+                                     # 17-19 unassigned
+    finished             = b'\x14'
+    certificate_url      = b'\x15'
+    certificate_status   = b'\x16'
+    supplemental_data    = b'\x17'
+                                     # 24-255 unassigned
+
+
+class AlertType(Enum):
+    close_notify                = b'\x00'   # 0
+    unexpected_message          = b'\x0a'   # 10
+    bad_record_mac              = b'\x14'   # 20
+    decryption_failed_RESERVED  = b'\x15'   # 21
+    record_overflow             = b'\x16'   # 22
+    decompression_failure       = b'\x1e'   # 30
+    handshake_failure           = b'\x28'   # 40
+    no_certificate_RESERVED     = b'\x29'   # 41
+    bad_certificate             = b'\x2a'   # 42
+    unsupported_certificate     = b'\x2b'   # 43
+    certificate_revoked         = b'\x2c'   # 44
+    certificate_expired         = b'\x2d'   # 45
+    certificate_unknown         = b'\x2e'   # 46
+    illegal_parameter           = b'\x2f'   # 47
+    unknown_ca                  = b'\x30'   # 48
+    access_denied               = b'\x31'   # 49
+    decode_error                = b'\x32'   # 50
+    decrypt_error               = b'\x33'   # 51
+    export_restriction_RESERVED = b'\x3c'   # 60
+    protocol_version            = b'\x46'   # 70
+    insufficient_security       = b'\x47'   # 71
+    internal_error              = b'\x50'   # 80
+    user_canceled               = b'\x5a'   # 90
+    no_renegotiation            = b'\x64'   # 100
+    unsupported_extension       = b'\x6e'   # 110
+
+
+def decode_alert(alert):
+    """Decode alert message. For interactive use."""
+    alert = alert[5:]
+    level = "Fatal: "
+    if alert[0] == b'\x01':
+        level = "Warning: "
+    return level + [atype.name for atype in AlertType if atype.value == alert[1:2]][0]
+
+
+class NamedCurve(Enum):
+    """Elliptic curves used in TLS."""
+    # 0, unassigned
+    sect163k1 = b"\x00\x01"
+    sect163r1 = b"\x00\x02"
+    sect163r2 = b"\x00\x03"
+    sect193r1 = b"\x00\x04"
+    sect193r2 = b"\x00\x05"
+    sect233k1 = b"\x00\x06"
+    sect233r1 = b"\x00\x07"
+    sect239k1 = b"\x00\x08"
+    sect283k1 = b"\x00\x09"
+    sect283r1 = b"\x00\x0a"
+    sect409k1 = b"\x00\x0b"
+    sect409r1 = b"\x00\x0c"
+    sect571k1 = b"\x00\x0d"
+    sect571r1 = b"\x00\x0e"
+    secp160k1 = b"\x00\x0f"
+    secp160r1 = b"\x00\x10"
+    secp160r2 = b"\x00\x11"
+    secp192k1 = b"\x00\x12"
+    secp192r1 = b"\x00\x13"
+    secp224k1 = b"\x00\x14"
+    secp224r1 = b"\x00\x15"
+    secp256k1 = b"\x00\x16"
+    secp256r1 = b"\x00\x17"
+    secp384r1 = b"\x00\x18"
+    secp521r1 = b"\x00\x19"
+    brainpoolP256r1 = b"\x00\x1a"
+    brainpoolP384r1 = b"\x00\x1b"
+    brainpoolP512r1 = b"\x00\x1c"
+    x25519    = b"\x00\x1d"
+    x448      = b"\x00\x1e"
+    # 31-255 unassigned
+    ffdhe2048 = b"\x01\x00"
+    ffdhe3072 = b"\x01\x01"
+    ffdhe4096 = b"\x01\x02"
+    ffdhe6144 = b"\x01\x03"
+    ffdhe8192 = b"\x01\x04"
+    # 261-507 unassigned
+    # 508-511 reserved for private use
+    # 512-65023 unassigned
+    # 65024-65279 reserved for private use
+    # 65280 unassigned
+
+    # These require explicit parameters to be provided beside them
+    #arbitrary_explicit_prime_curves = b"\xff\x01"
+    #arbitrary_explicit_char2_curves = b"\xff\x02"
+
+    # 65283-65535 unassigned
+
+
+class ExtensionType(Enum):
+    """TLS extension types.
+    For more details on TLS extensions, see RFC 5246, section 7.4.1.4.
+    """
+    server_name                            = b"\x00\x00"
+    max_fragment_length                    = b"\x00\x01"
+    client_certificate_url                 = b"\x00\x02"
+    trusted_ca_keys                        = b"\x00\x03"
+    truncated_hmac                         = b"\x00\x04"
+    status_request                         = b"\x00\x05"
+    user_mapping                           = b"\x00\x06"
+    client_authz                           = b"\x00\x07"
+    server_authz                           = b"\x00\x08"
+    cert_type                              = b"\x00\x09"
+    supported_groups                       = b"\x00\x0a"    # renamed from "elliptic_curves"
+    ec_point_formats                       = b"\x00\x0b"
+    srp                                    = b"\x00\x0c"
+    signature_algorithms                   = b"\x00\x0d"
+    use_strp                               = b"\x00\x0e"
+    heartbeat                              = b"\x00\x0f"
+    application_layer_protocol_negotiation = b"\x00\x10"
+    status_request_v2                      = b"\x00\x11"
+    signed_certificate_timestamp           = b"\x00\x12"
+    client_certificate_type                = b"\x00\x13"
+    server_certificate_type                = b"\x00\x14"
+    padding                                = b"\x00\x15"
+    encrypt_then_mac                       = b"\x00\x16"
+    extended_master_secret                 = b"\x00\x17"
+    token_binding                          = b"\x00\x18"    # TEMPORARY
+    cached_info                            = b"\x00\x19"
+                                                            # 26-34 unassigned
+    session_ticket_TLS                     = b"\x00\x23"
+                                                            # 36-65280 unassigned
+    renegotiation_info                     = b"\xff\x01"
+                                                            # 65282-65535 unassigned
 
 
 class CipherSuite(Enum):
@@ -420,54 +553,196 @@ rare_csuites = [cs for cs in CipherSuite if ("_DH_" in cs.name or
 frequent_csuites = [cs for cs in CipherSuite if (cs not in weak_csuites and
                                                  cs not in rare_csuites)]
 
+def lenprefix(data, nbytes=2):
+    """Prefix `data` with its length, in `nbytes` big-endian bytes.
+    If `data` is a string, it is first converted to bytes as UTF-8.
+    """
+    assert type(data) in (str, bytes)
+    if type(data) is str:
+        data = bytes(data, "utf8")
+    return len(data).to_bytes(nbytes, "big") + data
 
 
-def create_handshake_record(ssl_version, csuite_list, sni_url=None, max_version=None):
-    """Creates a handshake record with the specified TLS version
-    and cipher suites."""
+def crext_SNI(sni_url):
+    """Create a SNI extension, prefixed with its two-byte length"""
+    # start with single server hostname
+    #  (0x00 is the server name type; as of 2017, there's only one)
+    hostname = (b'\x00' + lenprefix(sni_url))
+
+    # wrap all hostnames into server name list
+    snlist = lenprefix(hostname)
+
+    # wrap it into the generic extension wrapper
+    #  (type- and length- prefix, 2B for each)
+    extension = ExtensionType.server_name.value + lenprefix(snlist)
+    return extension
+
+
+def crext_MaxFragmentLength(length_exponent):
+    """Create a MaxFragmentLength extension.
+    Allowed lengths are 2^9, 2^10, 2^11, 2^12. (TLS default is 2^14)
+    `length_exponent` must be 9, 10, 11, or 12.
+    """
+    if length_exponent == 9:
+        maxlen = b'\x01'
+    elif length_exponent == 10:
+        maxlen = b'\x02'
+    elif length_exponent == 11:
+        maxlen = b'\x03'
+    elif length_exponent == 12:
+        maxlen = b'\x04'
+    else:
+        raise ValueError("Unsupported fragment length")
+    return ExtensionType.max_fragment_length.value + lenprefix(maxlen)
+
+
+def crext_ClientCertificateURL():
+    """Create a Client Certificate URL extension."""
+    return ExtensionType.client_certificate_url.value + lenprefix(b"")
+
+
+def crext_TruncatedHMAC():
+    """Create a Truncated HMAC extension."""
+    return ExtensionType.truncated_hmac.value + lenprefix(b"")
+
+
+def crext_CertificateStatusRequest():
+    """Create a Certificate Status Request (OCSP stapling) extension"""
+    extension = (b"\x01"     # CertificateStatusType is OCSP (0x01)
+                + lenprefix(b"")  # responderID list and request extensions
+                + lenprefix(b"")) # (both empty -- known by "prior arrangement";
+                                  #   works for Firefox, anyway)
+    return ExtensionType.status_request.value + lenprefix(extension)
+
+
+def crext_UserMapping():
+    """Create a User Mapping extension"""
+    extension_data = lenprefix(b"\x40")  # UserMappingTypeList;
+                                # there is just one user mapping type.
+                                # (upn_domain_hint, value 64)
+    return ExtensionType.user_mapping.value + lenprefix(extension_data)
+
+
+def crext_SupportedGroups():
+    """Create a Supported Groups (formerly Elliptic Curves) extension.
+    Includes ALL defined curves."""
+    extension_data = lenprefix(b"".join(ec.value for ec in NamedCurve))
+    return ExtensionType.supported_groups.value + lenprefix(extension_data)
+
+
+def crext_ECPointFormats():
+    """Create an ec_point_formats extension, with all the formats in it."""
+    extension_data = lenprefix(b"\x00\x01\x02",1)
+    return ExtensionType.ec_point_formats.value + lenprefix(extension_data)
+
+
+def crext_Heartbeat(supported=True):
+    """Create a Heartbeat extension.
+    If `supported` is true, the extension indicates that the peer is allowed
+     to send Heartbeats.
+    """
+    if supported:
+        return ExtensionType.heartbeat.value + lenprefix(b"\x01")
+    else:
+        return ExtensionType.heartbeat.value + lenprefix(b"\x02")
+
+
+def crext_ALPN(protocol="both"):
+    """Create an ALPN extension.
+    `protocol` can take values "http/1.1", "http/2", and "both"."""
+    assert protocol in ["both", "http/1.1", "http/2"]
+    namelist = b""
+    if protocol in ["http/2", "both"]:   namelist += lenprefix(b"h2", 1)
+    if protocol in ["http/1.1", "both"]: namelist += lenprefix(b"http/1.1", 1)
+    namelist = lenprefix(namelist)
+    return ExtensionType.application_layer_protocol_negotiation.value + lenprefix(namelist)
+
+
+def crext_CertificateStatusRequestv2():
+    """Create an OCSP multi-stapling extension"""
+    item = (b"\x01"             # 0x01 for ocsp, 0x02 for ocsp_multi
+            + lenprefix(
+                lenprefix(b"") + lenprefix(b"")   # empty OCSPStatusRequest, as before
+            ))
+    # `item` here is basically a v1 request,
+    #  with two length bytes added after status_type (0x01/0x02).
+    # The v2 request contains a list of such items.
+    itemlist = lenprefix(item)
+    return ExtensionType.status_request_v2.value + lenprefix(itemlist)
+
+
+def crext_SessionTicket():
+    """Create an (empty) Session Ticket TLS extension"""
+    return ExtensionType.session_ticket_TLS.value + lenprefix(b"")
+
+
+def crext_EncryptThenMAC():
+    """Create an Encrypt-then-MAC extension"""
+    return ExtensionType.encrypt_then_mac.value + lenprefix(b"")
+
+
+def crext_ExtendedMasterSecret():
+    """Create an Extended Master Secret extension"""
+    return ExtensionType.extended_master_secret.value + lenprefix(b"")
+
+
+def crext_RenegotiationInfo():
+    """Create an (initial, empty) Renegotiation Info extension"""
+    extension = lenprefix(b"", 1)
+    return ExtensionType.renegotiation_info.value + lenprefix(extension)
+
+
+
+
+def create_handshake_record(ssl_version, csuite_list, sni_url=None, max_ssl_version=None, extensions=b""):
+    """Creates a handshake record with the specified parameters.
+    Arguments:
+        `ssl_version`     -- the SSL/TLS version to put in handshake
+        `csuite_list`     -- the list of ciphersuites to use
+        `sni_url`         -- the URL for use in the SNI extension
+                              (if falsy, SNI is not used)
+        `max_ssl_version` -- the highest client-supported SSL/TLS version;
+                              by default, `ssl_version` is used as both lowest and highest
+        `extensions`      -- the extensions to add to handshake; a bytestring
+    """
 
     csuites = b''.join( csuite.value for csuite in csuite_list )
-    csuites_len = len(csuites).to_bytes(2, "big")
 
     # First we build the handshake itself
     handshake = \
                ( (ssl_version.value          # max client-supported version
-                    if not max_version
-                    else   max_version.value)
+                    if not max_ssl_version
+                    else   max_ssl_version.value)
                 + os.urandom(32)  # (strictly speaking, first 4B should be GMT)
                 + b'\x00'         # session_id length is 0 (i.e. no session ID)
-                + csuites_len
-                + csuites
+                + lenprefix(csuites)
                 + b'\x01'         # compression methods field length
                 + b'\x00' )       # compression methods (only null compression)
 
+    extension_list = []
+
+    # usually necessary for connecting at all
     if sni_url:
-        # SNI extension content
-        sni_ext = ( b'\x00'                         # server name type (host name)
-                  + len(sni_url).to_bytes(2, "big") # server name length
-                  + bytes(sni_url, "utf8"))         # server name
+        extension_list.append( crext_SNI(sni_url) )
 
-        sni_ext = len(sni_ext).to_bytes(2, "big") + sni_ext
+    # necessary for ECC support
+    if any(["_EC" in cs.name for cs in csuite_list]):
+        extension_list.append( crext_SupportedGroups())
+        extension_list.append( crext_ECPointFormats())
 
-        # the wrapper
-        extension = (b'\x00\x00'                     # extension type (server name)
-                   + len(sni_ext).to_bytes(2, "big") # extension length
-                   + sni_ext)                        # extension itself
+    # the remaining extensions
+    extension_list.append( extensions )
 
-        handshake += len(extension).to_bytes(2, "big") + extension
+    handshake += lenprefix(b"".join(extension_list))
 
 
-
-    handshake = (HandshakeType.client_hello.value
-                + len(handshake).to_bytes(3, "big")
-                + handshake)
+    handshake = HandshakeType.client_hello.value + lenprefix(handshake, 3)
 
     # Then we build the record containing it
     handshake_record = (
                 RecordType.handshake.value
                 + ssl_version.value                 # min client-supported version
-                + len(handshake).to_bytes(2, "big")
-                + handshake )
+                + lenprefix(handshake))
 
     return handshake_record
 
@@ -532,6 +807,7 @@ def try_cipher(ssl_version, cipher, url="www.example.com"):
         return False
     finally:
         sock.close()
+
 
 def try_protocol(ssl_version, url):
     """Check whether the given SSL/TLS version is supported."""
