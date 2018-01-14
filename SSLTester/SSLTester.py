@@ -89,32 +89,27 @@ def get_certificate_chain(url):
         except:
             return []
 
-    handshake = create_handshake_record(SSLVersion.SSLv3,
-                                        [cs for cs in CipherSuite],
-                                        sni_url = url,
-                                        max_version = SSLVersion.TLSv1_2)
-
+    hello = create_client_hello(SSLVersion.SSLv3,
+                                [cs for cs in CipherSuite],
+                                sni_url = url,
+                                max_ssl_version = SSLVersion.TLSv1_2)
     try:
-        sock.send(handshake)
+        sock.send(hello)
         time.sleep(2)             # to make sure all data has arrived
         resp = sock.recv(100000)
     except ConnectionError:
         return []
 
-    # check if we actually got a handshake record
-    if resp[0:1] == RecordType.alert.value:
-        return []
-
+    # find a Certificate record
     while resp:
-        record, resp = extract_next_record(resp)
-        if record[0:1] == HandshakeType.certificate.value:
-            break
-        record = resp
+        try:    record = TLSRecord(resp)
+        except: return []
 
-    if not record:
-        return []
+        if record.type == RecordType.handshake and record.data[0:1] == HandshakeType.certificate.value:
+            return extract_certificate_chain(record)
+        resp = resp[5+len(record):]
 
-    return extract_certificate_chain(record)
+    return []
 
 
 def get_HTTP_header_fields(url, fieldnames):

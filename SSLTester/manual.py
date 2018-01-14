@@ -5,7 +5,28 @@ import time
 import socket
 import asn1crypto.x509
 
-class RecordType(Enum): # ContentType in RFC2246
+class ByteEnum(Enum):
+    """A standard enum.Enum, with just a few extra classmethods for convenience"""
+    @classmethod
+    def find(cls, x : bytes):
+        for _x in cls:
+            if x == _x.value:
+                return _x
+
+    @classmethod
+    def as_bytes(cls, bytes_iterable):
+        return b"".join(e.value for e in bytes_iterable)
+
+    @classmethod
+    def from_bytes(cls, bytestream):
+        alignment = len([_.value for _ in cls][0])
+        if len(bytestream) % alignment:
+            raise ValueError("Not an integral number of ByteEnums")
+        splat = [bytestream[i:i+2] for i in range(0,len(bytestream),alignment)]
+        return [[e for e in cls if e.value == b][0] for b in splat]
+
+
+class RecordType(ByteEnum): # ContentType in RFC2246
     """The type of the record (at the record protocol layer)"""
     change_cipher_spec = b'\x14'    # 20
     alert              = b'\x15'    # 21
@@ -14,7 +35,7 @@ class RecordType(Enum): # ContentType in RFC2246
     heartbeat          = b'\x18'    # 24
 
 
-class SSLVersion(Enum):
+class SSLVersion(ByteEnum):
     SSLv2   = b'\x02\x00'
     SSLv3   = b'\x03\x00'
     TLSv1   = b'\x03\x01'
@@ -25,19 +46,8 @@ class SSLVersion(Enum):
     def __lt__(a, b): return a.value < b.value
     def __le__(a, b): return a.value <= b.value
 
-    @staticmethod
-    def as_bytes(versions_iterable):
-        return b"".join(v.value for v in versions_iterable)
 
-    @staticmethod
-    def from_bytes(versions_bytes):
-        if len(versions_bytes) % 2:
-            raise ValueError("Not an integral number of versions")
-        splat = [versions_bytes[i:i+2] for i in range(0,len(versions_bytes),2)]
-        return [[v for v in SSLVersion if v.value==b] for b in splat]
-
-
-class HandshakeType(Enum):
+class HandshakeType(ByteEnum):
     """The type of the handshake message (over the record protocol layer)"""
     hello_request        = b'\x00'
     client_hello         = b'\x01'
@@ -59,7 +69,7 @@ class HandshakeType(Enum):
                                      # 24-255 unassigned
 
 
-class AlertType(Enum):
+class AlertType(ByteEnum):
     close_notify                = b'\x00'   # 0
     unexpected_message          = b'\x0a'   # 10
     bad_record_mac              = b'\x14'   # 20
@@ -96,7 +106,7 @@ def decode_alert(alert):
     return level + [atype.name for atype in AlertType if atype.value == alert[1:2]][0]
 
 
-class NamedCurve(Enum):
+class NamedCurve(ByteEnum):
     """Elliptic curves used in TLS."""
     # 0, unassigned
     sect163k1 = b"\x00\x01"
@@ -148,7 +158,7 @@ class NamedCurve(Enum):
     # 65283-65535 unassigned
 
 
-class ExtensionType(Enum):
+class ExtensionType(ByteEnum):
     """TLS extension types.
     For more details on TLS extensions, see RFC 5246, section 7.4.1.4.
     """
@@ -185,7 +195,7 @@ class ExtensionType(Enum):
                                                             # 65282-65535 unassigned
 
 
-class CipherSuite(Enum):
+class CipherSuite(ByteEnum):
     """List of all TLS ciphersuites,
     taken from `https://www.iana.org/assignments/tls-parameters/`"""
     TLS_NULL_WITH_NULL_NULL                       = b'\x00\x00' 
@@ -517,23 +527,6 @@ class CipherSuite(Enum):
     def __lt__(a, b): return a.value < b.value
     def __le__(a, b): return a.value <= b.value
 
-    @staticmethod
-    def find(cs : bytes):
-        for _cs in CipherSuite:
-            if cs == _cs.value:
-                return cs
-
-    @staticmethod
-    def as_bytes(csuites_iterable):
-        return b"".join(cs.value for cs in csuites_iterable)
-
-    @staticmethod
-    def from_bytes(csuites : bytes):
-        if len(csuites_bytes) % 2:
-            raise ValueError("Not an integral number of ciphersuites")
-        splat = [csuites[i:i+2] for i in range(0,len(csuites),2)]
-        return [CipherSuite.find(b) for b in splat]
-
 
 # Divide ciphersuites into disjoint sets, depending on how frequent they are.
 # We can then check the rarely used ones as a block, and fall back to checking
@@ -692,10 +685,89 @@ def crext_RenegotiationInfo():
     return ExtensionType.renegotiation_info.value + lenprefix(extension)
 
 
+class TLSExtension:
+    """A generic TLS extension (appears in client/server hellos)"""
+    def __init__(self, data):
+        self.type   = ExtensionType.find(data[0:2])
+        self.length = int.from_bytes(data[2:4], "big")
+        self.data   = data[4:4+self.length]
+        assert len(self.data) == self.length
+
+        if not self.type:    # in case of unknown/new extension
+            self.type = data[0:2]
+
+    def __len__(self):
+        return self.length
 
 
-def create_handshake_record(ssl_version, csuite_list, sni_url=None, max_ssl_version=None, extensions=b""):
-    """Creates a handshake record with the specified parameters.
+class ServerHello:
+    """A server_hello.
+    Parses itself from the provided bytestream, throws ValueError
+    in case of malformed/incomplete record (but tolerates trailing bytes).
+    """
+    def __init__(self, bytestream):
+        try:
+            self.type    = HandshakeType.server_hello
+            self.length  = int.from_bytes(bytestream[1:4], "big")
+            self.version = SSLVersion.find(bytestream[4:6])
+            self.random  = bytestream[6:38]
+
+            session_id_len  = bytestream[38]
+            assert session_id_len <= 32
+            self.session_id = bytestream[39:39+session_id_len]
+
+            bytestream = bytestream[39+session_id_len:]  # reset
+
+            self.ciphersuite = CipherSuite.find(bytestream[0:2])
+            self.compression_method = bytestream[2:3]
+
+            self.extensions_length = 0
+            self.extensions = []
+
+            # extensions
+            if len(bytestream) > 3:
+                self.extensions_length = int.from_bytes(bytestream[3:5], "big")
+                bytestream = bytestream[5:]
+                assert len(bytestream) == self.extensions_length
+
+                while bytestream:
+                    ext = TLSExtension(bytestream)
+                    self.extensions.append(ext)
+                    bytestream = bytestream[4+len(ext):]
+        except:
+            raise ValueError("Malformed server hello")
+
+
+class TLSRecord:
+    """A single record of the TLS Record layer.
+    Parses itself from the provided bytestream, throws ValueError
+    in case of malformed/incomplete record (but tolerates trailing bytes).
+    """
+    def __init__(self, bytestream):
+        try:
+            assert len(bytestream) >= 6
+
+            self.type = RecordType.find(bytestream[0:1])
+            assert self.type, "Invalid record type"
+
+            self.version = SSLVersion.find(bytestream[1:3])
+            assert self.version, "Invalid SSL version"
+
+            self.length = int.from_bytes(bytestream[3:5], "big")
+            assert 5 + self.length <= len(bytestream), "Incomplete record"
+
+            self.data = bytestream[5:5+self.length]
+        except AssertionError as e:
+            raise ValueError("Malformed TLS record") from e
+
+    def __len__(self):
+        return self.length
+
+
+
+
+def create_client_hello(ssl_version, csuite_list, sni_url=None, max_ssl_version=None, extensions=b""):
+    """Create a client hello (wrapped in a record) with the specified parameters.
     Arguments:
         `ssl_version`     -- the SSL/TLS version to put in handshake
         `csuite_list`     -- the list of ciphersuites to use
@@ -704,12 +776,14 @@ def create_handshake_record(ssl_version, csuite_list, sni_url=None, max_ssl_vers
         `max_ssl_version` -- the highest client-supported SSL/TLS version;
                               by default, `ssl_version` is used as both lowest and highest
         `extensions`      -- the extensions to add to handshake; a bytestring
+
+    Returns a TLS record in the form of bytes.
     """
 
     csuites = b''.join( csuite.value for csuite in csuite_list )
 
-    # First we build the handshake itself
-    handshake = \
+    # First we build the client_hello itself
+    hello = \
                ( (ssl_version.value          # max client-supported version
                     if not max_ssl_version
                     else   max_ssl_version.value)
@@ -723,40 +797,34 @@ def create_handshake_record(ssl_version, csuite_list, sni_url=None, max_ssl_vers
 
     # usually necessary for connecting at all
     if sni_url:
-        extension_list.append( crext_SNI(sni_url) )
+        extension_list.append(crext_SNI(sni_url))
 
     # necessary for ECC support
     if any(["_EC" in cs.name for cs in csuite_list]):
-        extension_list.append( crext_SupportedGroups())
-        extension_list.append( crext_ECPointFormats())
+        extension_list.append(crext_SupportedGroups())
+        extension_list.append(crext_ECPointFormats())
 
     # the remaining extensions
     extension_list.append( extensions )
 
-    handshake += lenprefix(b"".join(extension_list))
+    hello += lenprefix(b"".join(extension_list))
 
 
-    handshake = HandshakeType.client_hello.value + lenprefix(handshake, 3)
+    hello = HandshakeType.client_hello.value + lenprefix(hello, 3)
 
     # Then we build the record containing it
-    handshake_record = (
+    hello_record = (
                 RecordType.handshake.value
                 + ssl_version.value                 # min client-supported version
-                + lenprefix(handshake))
+                + lenprefix(hello))
 
-    return handshake_record
+    return hello_record
 
 
-
-def try_cipher(ssl_version, cipher, url="www.example.com"):
-    """Check whether a cipher is supported on the given website,
-    using the specified SSL/TLS version for the handshake.
-    
-    If `cipher` is falsy, this function checks whether the SSL/TLS version
-    is supported at all.
-    If `cipher` is a list, it checks whether at least one is supported.
+def try_handshake(url, client_hello):
+    """Connect to server, send client hello, and return the server's raw reply.
+    In case of failure, return False.
     """
-
     try:
         sock = socket.socket()
         sock.connect((url, 443))
@@ -766,47 +834,56 @@ def try_cipher(ssl_version, cipher, url="www.example.com"):
             sock.connect((url, 443))
         except:
             return False
+    try:
+        sock.send(client_hello)
+        resp = sock.recv(100000)
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+    return resp
+
+
+def try_cipher(ssl_version, cipher, url="www.example.com"):
+    """Check whether a cipher is supported on the given website,
+    using the specified SSL/TLS version for the handshake.
+
+    If `cipher` is falsy, this function checks whether the SSL/TLS version
+    is supported at all.
+    If `cipher` is a list, it checks whether at least one is supported.
+    """
 
     if not cipher:             _ = [cs for cs in CipherSuite]
     elif type(cipher) != list: _ = [cipher]
     else:                      _ = cipher
 
-    handshake = create_handshake_record(ssl_version, _, url)
-
-    try:
-        sock.send(handshake)
-        resp = sock.recv(100000)
-    except OSError:
+    # start doing the handshake
+    cHello = create_client_hello(ssl_version, _, url)
+    resp = try_handshake(url, cHello)
+    if not resp:
         return False
 
+    # the first record should be the server hello
     try:
-        # check record-protocol header
-        assert resp[0:1] == RecordType.handshake.value
-        assert resp[1:3] == ssl_version.value
+        reply = TLSRecord(resp)
+    except:
+        return False
 
-        record_length = int.from_bytes(resp[3:5], "big")
-        assert record_length <= len(resp) - 5   # the 5-byte header is not
-                                                #  included in the length
-
-        # check handshake-protocol header
-        handshake = resp[5:]
-        assert handshake[0:1] == HandshakeType.server_hello.value
-
-        hshake_length = int.from_bytes(handshake[1:4], "big")
-        assert hshake_length <= record_length - 4
-                            # assume no fragmentation!
-                            # also, handshake type and length are *not*
-                            # included in header length, but TLS version *is*
-
-        assert handshake[4:6] == ssl_version.value
+    # check the server's reply
+    try:
+        # check record header and server hello
+        assert reply.type == RecordType.handshake
+        assert reply.version == ssl_version
+        assert reply.data[0:1] == HandshakeType.server_hello.value
+        sHello = ServerHello(reply.data)
+        assert sHello.version == ssl_version
 
         # this should be enough for now
         return True
 
-    except AssertionError as e:
+    except (AssertionError, ValueError) as e:
         return False
-    finally:
-        sock.close()
 
 
 def try_protocol(ssl_version, url):
@@ -816,35 +893,15 @@ def try_protocol(ssl_version, url):
     return try_cipher(ssl_version, None, url)
 
 
-def extract_next_record(resp):
-    """Parse the received response and extract the first record-layer record
-    from it.
-
-    Returns a (record, remainder) tuple, where `record` is the extracted
-    record, and `remainder` is the rest of the response.
-    """
-
-    # for now, only handshakes
-    if not resp[0:1] == RecordType.handshake.value:
-        return (b"", b"")
-
-    record_len = int.from_bytes(resp[3:5], "big")
-
-    record = resp[5:record_len+5]
-    remainder = resp[record_len+5:]
-
-    return record, remainder
-
-
-def extract_certificate_chain(certshake):
+def extract_certificate_chain(cert_record : TLSRecord):
     """Extracts the certificate chain from the given record-layer Certificate
     record; returns a list of binary DER certificates"""
 
-    assert certshake[0:1] == HandshakeType.certificate.value
-    length       = int.from_bytes(certshake[1:4], "big")    # we ignore this one
-    certs_length = int.from_bytes(certshake[4:7], "big")
+    assert cert_record.data[0:1] == HandshakeType.certificate.value
+    length       = int.from_bytes(cert_record.data[1:4], "big")    # we ignore this one
+    certs_length = int.from_bytes(cert_record.data[4:7], "big")
 
-    certs = certshake[7:]
+    certs = cert_record.data[7:]
     assert len(certs) == certs_length
 
     cert_list = []
