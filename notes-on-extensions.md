@@ -7,6 +7,9 @@ certificate if multiple domains are hosted on the same IP.
 
 Often a prerequisite for establishing a TLS connection at all.
 
+NOTE: if the server does not send this extension in the server hello, it might
+      be just because it doesn't need SNI, and is therefore not obliged to do so.
+
 
 1. Maximum fragment length negotiation (`max_frag_length`)
 ----------------------------------------------------------
@@ -25,7 +28,9 @@ As for the extension itself, [this thread][4] might be of interest.
 [3]: https://www.wolfssl.com/products/wolfssl/
 [4]: https://www.ietf.org/mail-archive/web/tls/current/msg22058.html
 
-So far, not testing for it.
+The RFC specifies that if the server receives a value other than the allowed
+ones, it MUST abort the handshake with an `illegal_parameter` alert; this can
+be used for testing whether the server understands the extension at all.
 
 
 2. Client certificate URL
@@ -95,14 +100,16 @@ Used for requesting the use of OpenPGP certificates.
 ("OpenPGP certificate" meaning an OpenPGP key enabled for authentication.)
 Client sends list of supported CertificateTypes, server chooses one.
 
-Server MUST choose one or terminate with a fatal alert.
+Server MUST choose one or terminate with an `unsupported_certificate` alert.
 Client MUST NOT send this extension if it supports only X.509 certs.
 Server MAY omit echoing this extension if it support only X.509 certs.
 
 Given the last one, this one likely just tests for OpenPGP cert support.
 (Which I'd assume is extremely rare.)
 
-Not testing.
+However, we can test whether the server understands the extension, since if it
+does, it will either terminate with `unsupported_certificate` or accept the use
+of OpenPGP keys.
 
 
 10. Supported groups (a.k.a. Elliptic curves, RFC 4492, additionally 7919)
@@ -146,7 +153,7 @@ This one is part of the original TLS 1.2 specification.
 Used to indicate which algorithm/hash pairs the client supports.
 Servers MUST NOT send this extension.
 TLS servers MUST support receiving this extension. (ignoring it in case of TLS <1.1)
-If the client only support the default hash and signature algorithms,
+If the client only supports the default hash and signature algorithms,
 it MAY omit sending this extension.
 
 There's no way to easily discern what the server thinks about it.
@@ -196,7 +203,6 @@ if I'm understanding the RFC correctly.
 Indicates the certificate types that the client is able to provide (process)
 to the server. Meant to signal support for using raw public keys.
 I don't think this is applicable to public web-servers. Not testing for it.
-
 
 
 21. Padding (RFC 7685)

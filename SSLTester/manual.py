@@ -194,6 +194,9 @@ class ExtensionType(ByteEnum):
     renegotiation_info                     = b"\xff\x01"
                                                             # 65282-65535 unassigned
 
+    def __lt__(a, b): return a.value < b.value
+    def __le__(a, b): return a.value <= b.value
+
 
 class CipherSuite(ByteEnum):
     """List of all TLS ciphersuites,
@@ -574,18 +577,10 @@ def crext_SNI(sni_url):
 def crext_MaxFragmentLength(length_exponent):
     """Create a MaxFragmentLength extension.
     Allowed lengths are 2^9, 2^10, 2^11, 2^12. (TLS default is 2^14)
-    `length_exponent` must be 9, 10, 11, or 12.
+    `length_exponent` should be 9, 10, 11, or 12, otherwise the extension will
+    contain an illegal value.
     """
-    if length_exponent == 9:
-        maxlen = b'\x01'
-    elif length_exponent == 10:
-        maxlen = b'\x02'
-    elif length_exponent == 11:
-        maxlen = b'\x03'
-    elif length_exponent == 12:
-        maxlen = b'\x04'
-    else:
-        raise ValueError("Unsupported fragment length")
+    maxlen = (length_exponent-8).to_bytes(1,"big")
     return ExtensionType.max_fragment_length.value + lenprefix(maxlen)
 
 
@@ -614,6 +609,17 @@ def crext_UserMapping():
                                 # there is just one user mapping type.
                                 # (upn_domain_hint, value 64)
     return ExtensionType.user_mapping.value + lenprefix(extension_data)
+
+
+def crext_CertificateType(types):
+    """Create a Certificate Type extension.
+    `types` can take values "X.509", "OpenPGP", and "both"."""
+    assert types in ["both", "X.509", "OpenPGP"]
+    typelist = b""
+    if types in ["X.509", "both"]:   typelist += b"\x00"
+    if types in ["OpenPGP", "both"]: typelist += b"\x01"
+    typelist = lenprefix(typelist,1)
+    return ExtensionType.cert_type.value + lenprefix(typelist)
 
 
 def crext_SupportedGroups():
@@ -662,6 +668,11 @@ def crext_CertificateStatusRequestv2():
     # The v2 request contains a list of such items.
     itemlist = lenprefix(item)
     return ExtensionType.status_request_v2.value + lenprefix(itemlist)
+
+
+def crext_SignedCertificateTimestamp():
+    """Create an (empty) Signed Certificate Timestamp extension."""
+    return ExtensionType.signed_certificate_timestamp.value + lenprefix(b"")
 
 
 def crext_SessionTicket():
@@ -916,6 +927,150 @@ def extract_certificate_chain(cert_record : TLSRecord):
 
     return cert_list
     # return [asn1crypto.x509.Certificate.load(c) for c in cert_list)
+
+
+def scan_all_extensions(ssl_version, url, delay=0.0):
+    """Scan for support of all TLS extensions.
+    Note: heartbeat detection should be improved by trying to send heartbeats.
+    """
+    # I don't think there *should* be interaction between some extensions
+    #  (such as status_request and status_request_v2, for example),
+    #  but I'm testing for them in separate handshakes anyway.
+
+    supported = []
+
+    # 0. Server name indication (SNI)
+    cHello = create_client_hello(ssl_version, [cs for cs in CipherSuite], url)
+    try:
+        # expect server_hello with a server_name extension
+        reply = TLSRecord(try_handshake(url, cHello))
+        assert reply.type == RecordType.handshake
+        assert reply.data[0:1] == HandshakeType.server_hello.value
+        sHello = ServerHello(reply.data)
+        assert any(e.type == ExtensionType.server_name for e in sHello.extensions)
+        supported.append(ExtensionType.server_name)
+    except:
+        pass
+
+    time.sleep(delay)
+
+    # 1. Maximum fragment length
+    cHello = create_client_hello(ssl_version, [cs for cs in CipherSuite], url,
+               extensions = crext_MaxFragmentLength(12))
+    try:
+        # expect server_hello with a max_fragment_length extension
+        reply = TLSRecord(try_handshake(url, cHello))
+        assert reply.type == RecordType.handshake
+        assert reply.data[0:1] == HandshakeType.server_hello.value
+        sHello = ServerHello(reply.data)
+        assert any(e.type == ExtensionType.max_fragment_length for e in sHello.extensions)
+        supported.append(ExtensionType.max_fragment_length)
+    except:
+        # otherwise, check if it understands the extension at all
+        cHello = create_client_hello(ssl_version, [cs for cs in CipherSuite], url,
+                   extensions = crext_MaxFragmentLength(99))
+        try:
+            reply = TLSRecord(try_handshake(url, cHello))
+            assert reply.type == RecordType.alert
+            assert reply.data[1:2] == AlertType.illegal_parameter.value
+            supported.append(ExtensionType.max_fragment_length)
+        except:
+            pass
+
+    time.sleep(delay)
+
+    # 4 (Truncated HMAC), 5 (OCSP stapling), 6 (User mapping)
+    extensions = (crext_TruncatedHMAC()
+                 + crext_CertificateStatusRequest()
+                 + crext_UserMapping())
+    cHello = create_client_hello(ssl_version, [cs for cs in CipherSuite], url, extensions=extensions)
+    try:
+        # expect server_hello with the extensions included
+        reply = TLSRecord(try_handshake(url, cHello))
+        assert reply.type == RecordType.handshake
+        assert reply.data[0:1] == HandshakeType.server_hello.value
+        sHello = ServerHello(reply.data)
+        if any(e.type == ExtensionType.truncated_hmac for e in sHello.extensions):
+            supported += [ExtensionType.truncated_hmac]
+        if any(e.type == ExtensionType.status_request for e in sHello.extensions):
+            supported += [ExtensionType.status_request]
+        if any(e.type == ExtensionType.user_mapping for e in sHello.extensions):
+            supported += [ExtensionType.user_mapping]
+    except:
+        pass
+
+    time.sleep(delay)
+
+    # 9. Certificate type
+    cHello = create_client_hello(ssl_version, [cs for cs in CipherSuite], url,
+               extensions = crext_CertificateType("OpenPGP"))
+    try:
+        # expect either server_hello with a cert_type extension,
+        # or an unsupported_certificate fatal alert
+        reply = TLSRecord(try_handshake(url, cHello))
+        if reply.type == RecordType.alert and reply.data[1:2] == AlertType.unsupported_certificate:
+            supported += [ExtensionType.cert_type]
+        elif reply.type == RecordType.handshake:
+            assert reply.data[0:1] == HandshakeType.server_hello.value
+            sHello = ServerHello(reply.data)
+            assert any(e.type == ExtensionType.cert_type for e in sHello.extensions)
+            supported += [ExtensionType.cert_type]
+    except:
+        pass
+
+    time.sleep(delay)
+
+    # 15 (Heartbeat), 16 (ALPN), 17 (OCSP multi-stapling)
+    extensions = (crext_Heartbeat()
+                 + crext_ALPN()
+                 + crext_CertificateStatusRequestv2())
+    cHello = create_client_hello(ssl_version, [cs for cs in CipherSuite], url, extensions=extensions)
+    try:
+        # expect server_hello with the extensions included
+        reply = TLSRecord(try_handshake(url, cHello))
+        assert reply.type == RecordType.handshake
+        assert reply.data[0:1] == HandshakeType.server_hello.value
+        sHello = ServerHello(reply.data)
+        if any(e.type == ExtensionType.heartbeat for e in sHello.extensions):
+            supported += [ExtensionType.heartbeat]
+        if any(e.type == ExtensionType.application_layer_protocol_negotiation for e in sHello.extensions):
+            supported += [ExtensionType.application_layer_protocol_negotiation]
+        if any(e.type == ExtensionType.status_request_v2 for e in sHello.extensions):
+            supported += [ExtensionType.status_request_v2]
+    except:
+        pass
+
+    time.sleep(delay)
+
+    # 18 (SCT), 22 (Encrypt-then-MAC), 23 (Extended master secret),
+    # 35 (Session ticket), 65281 (Renegotiation info)
+    extensions = (crext_SignedCertificateTimestamp()
+                + crext_EncryptThenMAC()
+                + crext_ExtendedMasterSecret()
+                + crext_SessionTicket()
+                + crext_RenegotiationInfo())
+    cHello = create_client_hello(ssl_version, [cs for cs in CipherSuite], url, extensions=extensions)
+    try:
+        # expect server_hello with the extensions included
+        reply = TLSRecord(try_handshake(url, cHello))
+        assert reply.type == RecordType.handshake
+        assert reply.data[0:1] == HandshakeType.server_hello.value
+        sHello = ServerHello(reply.data)
+        if any(e.type == ExtensionType.signed_certificate_timestamp for e in sHello.extensions):
+            supported += [ExtensionType.signed_certificate_timestamp]
+        if any(e.type == ExtensionType.encrypt_then_mac for e in sHello.extensions):
+            supported += [ExtensionType.encrypt_then_mac]
+        if any(e.type == ExtensionType.extended_master_secret for e in sHello.extensions):
+            supported += [ExtensionType.extended_master_secret]
+        if any(e.type == ExtensionType.session_ticket_TLS for e in sHello.extensions):
+            supported += [ExtensionType.session_ticket_TLS]
+        if any(e.type == ExtensionType.renegotiation_info for e in sHello.extensions):
+            supported += [ExtensionType.renegotiation_info]
+    except:
+        pass
+
+    return supported
+
 
 
 def scan_all_ciphers(ssl_version, url="www.example.com", delay=0.0):

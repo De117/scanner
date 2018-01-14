@@ -146,6 +146,8 @@ class Record:
         self.cipher_suites = []
         self.timestamp = int(time.time())
         self.certificate = None
+        self.certificate_chain = []
+        self.extensions = []
 
 
     def add_protocol(self, protocol):
@@ -162,7 +164,7 @@ class Record:
         SQL_GET_INDEX = "SELECT COALESCE(MAX(indeks),0) FROM certificates;"
         SQL_GET_CERT  = "SELECT indeks FROM certificates WHERE certificate = ?;"
         SQL_INSERT_CERT = "INSERT INTO certificates VALUES (?,?);"
-        SQL_INSERT_MAIN = "INSERT INTO scan_results VALUES (?,?,?,?,?,?,?);"
+        SQL_INSERT_MAIN = "INSERT INTO scan_results VALUES (?,?,?,?,?,?,?,?);"
 
         certs = []
         for cert in self.certificate_chain:   # insert any new certificates first
@@ -187,10 +189,12 @@ class Record:
 
         protos_bytes  = SSLVersion.as_bytes(self.protocols)
         csuite_bytes  = CipherSuite.as_bytes(self.cipher_suites)
+        ext_bytes     = ExtensionType.as_bytes(self.extensions)
         cchain_string = "$".join(str(i) for i in certs)
         HTTP_fields = "_$_".join(k+":"+v for k,v in self.HTTP_header_fields.items())
         if not protos_bytes:  protos_bytes  = None
         if not csuite_bytes:  csuite_bytes  = None
+        if not ext_bytes:     ext_bytes     = None
         if not cchain_string: cchain_string = None
         if not HTTP_fields:   HTTP_fields   = None
 
@@ -198,7 +202,7 @@ class Record:
         db_cursor.execute(SQL_INSERT_MAIN,
                            (self.hostname, self.IP, self.timestamp,
                             protos_bytes, csuite_bytes, cchain_string,
-                            HTTP_fields))
+                            ext_bytes, HTTP_fields))
 
 
     def __str__(self):
@@ -226,6 +230,7 @@ def init_db_tables(db_cursor):
         "    protocols          BLOB,\n"
         "    ciphersuites       BLOB,\n"
         "    certificate_chain  TEXT,\n"
+        "    extensions         BLOB,\n"
         "    HTTP_header_fields TEXT,\n"
         "    PRIMARY KEY (hostname, timestamp));\n"
     )
@@ -266,6 +271,10 @@ def process(host):
 
     # record the certificate chain
     record.certificate_chain = get_certificate_chain(url)
+
+    # detect supported extensions
+    extensions = scan_all_extensions(SSLVersion.TLSv1_2, url)
+    record.extensions = sorted(extensions)
 
     # record certain response header fields
     fields = get_HTTP_header_fields(hostname,
