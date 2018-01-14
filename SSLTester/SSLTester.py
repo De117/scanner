@@ -10,7 +10,7 @@ import threading
 import asn1crypto.x509
 import requests
 
-from SSLTester.manual import *
+from .manual import *
 
 DETECT_CIPHERS = True
 DEFAULT_TIMEOUT = 5.0

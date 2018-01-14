@@ -1073,27 +1073,21 @@ def scan_all_extensions(ssl_version, url, delay=0.0):
 
 
 
-def scan_all_ciphers(ssl_version, url="www.example.com", delay=0.0):
+def scan_all_ciphers(ssl_version, url, delay=0.0):
     supported_csuites = []
     to_scan = []
 
     # check weak csuites
-    print(url+" -- checking weak csuites", file=sys.stderr)
     if try_cipher(ssl_version, weak_csuites, url):
         to_scan += weak_csuites
     # check rare csuites
-    print(url+" -- checking rare csuites", file=sys.stderr)
     if try_cipher(ssl_version, rare_csuites, url):
         to_scan += rare_csuites
     # check frequent csuites
-    print(url+" -- checking freq csuites", file=sys.stderr)
     if try_cipher(ssl_version, frequent_csuites, url):
         to_scan += frequent_csuites
 
-    print("starting scan of {} csuites...".format(len(to_scan)), file=sys.stderr)
-
     for csuite in to_scan:
-        print(url+" -- scanning "+csuite.name, file=sys.stderr)
         ok = try_cipher(ssl_version, csuite, url)
         if ok:
             supported_csuites += [csuite]
