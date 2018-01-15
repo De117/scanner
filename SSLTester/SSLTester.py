@@ -97,7 +97,7 @@ def get_certificate_chain(url):
         sock.send(hello)
         time.sleep(2)             # to make sure all data has arrived
         resp = sock.recv(100000)
-    except ConnectionError:
+    except OSError:
         return []
 
     # find a Certificate record
@@ -148,6 +148,7 @@ class Record:
         self.certificate = None
         self.certificate_chain = []
         self.extensions = []
+        self.HTTP_header_fields = {}
 
 
     def add_protocol(self, protocol):
@@ -260,29 +261,35 @@ def process(host):
     # detect supported protocol versions
     record.protocols = [v for v in SSLVersion if try_protocol(v, url)]
 
-    # detect supported cipher suites
-    # cs_ssl3   = scan_all_ciphers(SSLVersion.SSLv3,   url)
-    # cs_tls1   = scan_all_ciphers(SSLVersion.TLSv1,   url)
-    # cs_tls1_1 = scan_all_ciphers(SSLVersion.TLSv1_1, url)
-    cs_tls1_2 = scan_all_ciphers(SSLVersion.TLSv1_2, url)
+    if record.protocols:
+        # detect supported cipher suites
+        #  (don't duplicate, try just on the highest-supported protocol)
+        if SSLVersion.TLSv1_2 in record.protocols:
+            cs = scan_all_ciphers(SSLVersion.TLSv1_2, url)
+        elif SSLVersion.TLSv1_1 in record.protocols:
+            cs = scan_all_ciphers(SSLVersion.TLSv1_1, url)
+        elif SSLVersion.TLSv1 in record.protocols:
+            cs = scan_all_ciphers(SSLVersion.TLSv1,   url)
+        else:
+            cs = scan_all_ciphers(SSLVersion.SSLv3,   url)
 
-    # record.cipher_suites = list(set(cs_ssl3 + cs_tls1 + cs_tls1_1 + cs_tls1_2))
-    record.cipher_suites = sorted(cs_tls1_2)
+        # record.cipher_suites = list(set(cs_ssl3 + cs_tls1 + cs_tls1_1 + cs_tls1_2))
+        record.cipher_suites = sorted(cs)
 
-    # record the certificate chain
-    record.certificate_chain = get_certificate_chain(url)
+        # record the certificate chain
+        record.certificate_chain = get_certificate_chain(url)
 
-    # detect supported extensions
-    extensions = scan_all_extensions(SSLVersion.TLSv1_2, url)
-    record.extensions = sorted(extensions)
+        # detect supported extensions
+        extensions = scan_all_extensions(SSLVersion.TLSv1_2, url)
+        record.extensions = sorted(extensions)
 
-    # record certain response header fields
-    fields = get_HTTP_header_fields(hostname,
-                                    ["Server",
-                                     "Strict-Transport-Security",
-                                     "Public-Key-Pins",
-                                     "Public-Key-Pins-Report-Only"])
-    record.HTTP_header_fields = fields;
+        # record certain response header fields
+        fields = get_HTTP_header_fields(hostname,
+                                        ["Server",
+                                        "Strict-Transport-Security",
+                                        "Public-Key-Pins",
+                                        "Public-Key-Pins-Report-Only"])
+        record.HTTP_header_fields = fields;
 
     return record
 
